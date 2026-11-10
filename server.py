@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import queue
 import threading
@@ -31,6 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from core import CutConfig, CutEngine, segments_from_points
+from labels import LabelStore, STATUSES, import_full_csv
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
@@ -102,6 +104,7 @@ class Broadcast:
 
 
 BROADCAST = Broadcast()
+LABELS = LabelStore(ROOT / "labeldb.sqlite3")
 ENGINE = CutEngine(CONFIG, on_event=lambda e: BROADCAST.push(e))
 
 
@@ -298,6 +301,43 @@ class Handler(BaseHTTPRequestHandler):
             return self._autolist(body)
         if path == "/api/adopt":
             return self._adopt(body)
+        if path == "/api/labels":
+            return self._json({"labels": LABELS.list_labels()})
+        if path == "/api/labels-add":
+            label = LABELS.add_label(body.get("name", ""), body.get("color", "#8b5cf6"),
+                                     body.get("hotkey", ""))
+            return self._json({"ok": True, "label": label})
+        if path == "/api/labels-delete":
+            removed = LABELS.delete_label(int(body.get("id", 0)))
+            return self._json({"ok": removed > 0})
+        if path == "/api/annotate":
+            clip = (body.get("clip") or "").strip()
+            if not clip:
+                return self._json({"error": "缺少 clip"}, 400)
+            if body.get("labelId") is not None:
+                on = LABELS.toggle_clip_label(clip, int(body["labelId"]),
+                                              body.get("reviewer", "local-user"))
+                return self._json({"ok": True, "on": on, "record": LABELS.clip_record(clip)})
+            if body.get("status"):
+                try:
+                    rec = LABELS.set_clip_status(clip, body["status"],
+                                                 body.get("reviewer", "local-user"),
+                                                 body.get("note", ""))
+                except ValueError as exc:
+                    return self._json({"error": str(exc)}, 400)
+                return self._json({"ok": True, "record": rec})
+            return self._json({"error": "缺少 labelId 或 status"}, 400)
+        if path == "/api/annotations":
+            return self._json({"records": LABELS.all_records(), "statuses": STATUSES})
+        if path == "/api/export-dataset":
+            return self._export_dataset(body)
+        if path == "/api/migrate-vl":
+            src = (body.get("path") or "").strip()
+            p_in = Path(src)
+            if not p_in.is_file():
+                return self._json({"error": f"文件不存在: {src}"}, 400)
+            count = import_full_csv(LABELS, p_in)
+            return self._json({"ok": True, "clips": count})
         if path == "/api/save-csv":
             path_out = ENGINE.save_csv()
             return self._json({"ok": True, "path": str(path_out)})
@@ -407,6 +447,44 @@ class Handler(BaseHTTPRequestHandler):
         total = ENGINE.adopt_rows(rows)
         BROADCAST.push({"type": "snapshot", "state": snapshot()})
         self._json({"ok": True, "total": total})
+
+    def _export_dataset(self, body: dict) -> None:
+        """审核通过(可选+已标注)的切片 → dataset/{train,val} + classes.txt + labels/*.txt + manifest.csv。"""
+        import shutil
+        ratio = float(body.get("ratio", 0.8))
+        rows = LABELS.manifest_rows()
+        if not rows:
+            return self._json({"error": "没有可导出的已审核标注"}, 400)
+        classes = sorted({r["label"] for r in rows})
+        class_ids = {name: i for i, name in enumerate(classes)}
+        out_root = Path(CONFIG.output_dir) / "dataset"
+        for split in ("train", "val"):
+            (out_root / split).mkdir(parents=True, exist_ok=True)
+            (out_root / split / "labels").mkdir(exist_ok=True)
+        manifest_path = out_root / "manifest.csv"
+        counts = {"train": 0, "val": 0}
+        seen = {}
+        with manifest_path.open("w", encoding="utf-8-sig", newline="") as mf:
+            writer = csv.writer(mf)
+            writer.writerow(["split", "clip", "label", "class_id"])
+            for r in rows:
+                if r["clip"] not in seen:
+                    # 80/20 轮转分配(同片段文件只复制一次,多标签共用该文件)
+                    split = "val" if (counts["train"] + counts["val"]) % 5 == 4 else "train"
+                    src = Path(CONFIG.output_dir) / r["clip"]
+                    if not src.is_file():
+                        continue
+                    shutil.copy2(src, out_root / split / r["clip"])
+                    seen[r["clip"]] = split
+                    counts[split] += 1
+                split = seen[r["clip"]]
+                stem = Path(r["clip"]).stem
+                with (out_root / split / "labels" / (stem + ".txt")).open("a", encoding="utf-8") as lf:
+                    lf.write(str(class_ids[r["label"]]) + chr(10))
+                writer.writerow([split, r["clip"], r["label"], class_ids[r["label"]]])
+        (out_root / "classes.txt").write_text(chr(10).join(classes), encoding="utf-8")
+        self._json({"ok": True, "classes": classes, "train": counts["train"],
+                    "val": counts["val"], "path": str(out_root)})
 
     def _start(self) -> None:
         if ENGINE.stage == "running":

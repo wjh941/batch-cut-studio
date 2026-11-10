@@ -734,3 +734,17 @@ table.tasks tr.is-problem td:nth-child(3) { color: #fcd34d; }
   .stats { grid-template-columns: repeat(3, 1fr); }
   .global-progress { display: none; }
 }
+/* 标注 */
+.col-anno { width: 210px; }
+.anno-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.anno-chip { font: 600 10.5px var(--mono); padding: 2px 8px; border-radius: 99px; border: 1px solid transparent; cursor: pointer; transition: all .15s; }
+.anno-chip:hover { filter: brightness(1.3); }
+.anno-chip.off { color: var(--text-3); border-color: var(--line); background: transparent; }
+tr.is-selected td { background: rgba(99, 102, 241, .08); }
+.kbd-hint { display: flex; gap: 16px; flex-wrap: wrap; padding: 8px 22px; font-size: 11.5px; color: var(--text-2); background: rgba(99,102,241,.1); border-top: 1px solid rgba(99,102,241,.25); }
+.kbd-hint b { color: var(--acc-2); font-family: var(--mono); }
+.label-list { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow: auto; }
+.label-row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border: 1px solid var(--line-soft); border-radius: 8px; font-family: var(--mono); font-size: 12.5px; }
+.label-row .dot { width: 10px; height: 10px; border-radius: 99px; }
+.label-row .del { margin-left: auto; border: 0; background: none; color: var(--text-3); cursor: pointer; }
+.label-row .del:hover { color: var(--bad); }

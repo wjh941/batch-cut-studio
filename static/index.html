@@ -177,6 +177,8 @@
       <div class="table-tools-right">
         <button id="btn-retry" class="btn ghost sm" hidden>重试失败项</button>
         <button id="btn-report" class="btn ghost sm" hidden>导出失败清单</button>
+        <button id="btn-labels" class="btn ghost sm">标签管理</button>
+        <button id="btn-export-ds" class="btn soft sm">导出数据集</button>
       </div>
     </div>
 
@@ -189,6 +191,7 @@
             <th>源视频</th>
             <th>时间段</th>
             <th>输出</th>
+            <th class="col-anno">标注</th>
             <th class="col-prog">进度</th>
             <th class="col-act">预览</th>
           </tr>
@@ -217,6 +220,28 @@
     <div id="log-lines" class="log-lines"></div>
   </div>
 </footer>
+
+<!-- 标签管理弹窗 -->
+<div class="modal-backdrop" id="labelmgr" hidden>
+  <div class="modal" style="width:min(520px,92vw)">
+    <div class="modal-head"><strong>行为标签管理</strong>
+      <button class="modal-close" id="labelmgr-close">✕</button></div>
+    <div class="edit-body">
+      <div id="label-list" class="label-list"></div>
+      <div class="edit-row" style="margin-top:12px">
+        <input id="label-new-name" class="input mono" placeholder="新标签名,如 pool">
+        <button class="btn soft sm" id="label-add">添加</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 键盘提示条 -->
+<div id="kbd-hint" class="kbd-hint" hidden>
+  <span>已选中 <b id="kbd-clip">—</b></span>
+  <span>数字键 1-9 切标签</span><span>Q 审核模式:1 通过 / 2 需修正 / 3 剔除 / 4 待审</span>
+  <span>J / K 上下切换</span><span>Esc 取消选中</span>
+</div>
 
 <!-- 预览弹窗 -->
 <div class="modal-backdrop" id="preview" hidden>

@@ -1,7 +1,11 @@
-# 🎬 BatchCut Studio · 批量剪辑工场
+# 🎬 BatchCut Studio · 剪辑标注工场
 
-监控视频批量切片工具的**现代化升级版**:CSV 任务清单 + ffmpeg 并行切割 + 实时进度 Web UI。
-零第三方依赖(Python 标准库 + 手写前端),`python server.py` 一条命令起界面。
+**数据集生产流水线:切片 → 标注 → 审核 → 训练集导出,一条龙。**
+监控视频 CSV 任务清单 + ffmpeg 并行切割(Smart Cut 关键帧吸附)+ 浏览器内行为标注 + 审核流 +
+train/val 数据集导出。零第三方依赖(Python 标准库 + SQLite + 手写前端),`python server.py` 一条命令起界面。
+
+> v2.0 起吸收了原 video_labeler(PySide6 桌面标注工具)的全部核心资产:四态审核状态机、
+> append-only 审核历史、10 个内置行为标签、完整版 CSV 25 列迁移兼容(`/api/migrate-vl` 端点)。
 
 ```
 来源: batch_cut_clips.py(6.8/10 个人脚本) → BatchCut Studio(9+/10 本地产品)

@@ -4,6 +4,10 @@
 const $ = (id) => document.getElementById(id);
 const state = {
   tasks: new Map(),        // index -> task
+  labels: [],
+  annotations: {},         // clip(output 相对路径) -> 标注记录
+  selectedClip: null,
+  reviewMode: false,
   filter: "all",
   stage: "idle",
   counts: {},
@@ -135,6 +139,7 @@ function renderTable() {
         <td class="cell-path"></td>
         <td class="cell-time"></td>
         <td class="cell-path"></td>
+        <td><div class="anno-chips"></div></td>
         <td><div class="task-progress">
           <div class="task-progress-track"><div class="task-progress-fill"></div></div>
           <span class="task-progress-text"></span>
@@ -215,6 +220,40 @@ function fillRow(tr, t) {
   fill.classList.toggle("running", t.status === "running");
   tr.querySelector(".task-progress-text").textContent =
     t.status === "running" ? `${pct}%${t.speed ? " " + t.speed : ""}` : STATUS_TEXT[t.status] || "";
+
+  const anno = state.annotations[t.output] || { labelIds: [], status: "pending" };
+  const chips = tr.querySelector(".anno-chips");
+  chips.innerHTML = "";
+  state.labels.forEach((label) => {
+    const on = anno.labelIds.includes(label.id);
+    const chip = document.createElement("span");
+    chip.className = "anno-chip";
+    chip.style.background = on ? label.color + "33" : "transparent";
+    chip.style.color = on ? label.color : "var(--text-3)";
+    chip.style.borderColor = on ? label.color : "var(--line)";
+    chip.textContent = label.hotkey ? label.hotkey + " " + label.name : label.name;
+    chip.title = (on ? "点击摘除「" : "点击打上「") + label.name + "」";
+    chip.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      annotate(t.output, { labelId: label.id });
+    });
+    chips.appendChild(chip);
+  });
+  if (anno.status === "approved") {
+    const ok = document.createElement("span");
+    ok.className = "anno-chip";
+    ok.style.background = "rgba(52,211,153,.15)";
+    ok.style.color = "var(--ok)";
+    ok.textContent = "✓";
+    chips.appendChild(ok);
+  } else if (anno.status === "needs_fix" || anno.status === "rejected") {
+    const bad = document.createElement("span");
+    bad.className = "anno-chip";
+    bad.style.background = "rgba(248,113,113,.15)";
+    bad.style.color = "var(--bad)";
+    bad.textContent = anno.status === "rejected" ? "剔除" : "需修正";
+    chips.appendChild(bad);
+  }
 
   const eye = tr.querySelector(".btn-eye");
   const srcOk = t.sourceExists !== false && !!t.source;
@@ -622,6 +661,31 @@ function bind() {
     $("auto-threshold").value = black ? 0.5 : 0.35;
   });
 
+  $("task-body").addEventListener("click", (e) => {
+    const tr = e.target.closest("tr[data-index]");
+    if (!tr || e.target.closest(".btn-eye") || e.target.closest(".btn-pencil") || e.target.closest(".anno-chip")) return;
+    selectClip(Number(tr.dataset.index));
+  });
+  $("btn-labels").addEventListener("click", openLabelMgr);
+  $("labelmgr-close").addEventListener("click", () => { $("labelmgr").hidden = true; });
+  $("label-add").addEventListener("click", async () => {
+    const name = $("label-new-name").value.trim();
+    if (!name) return;
+    await api("/api/labels-add", { name });
+    $("label-new-name").value = "";
+    state.labels = (await api("/api/labels")).labels;
+    renderLabelMgr();
+    renderTable();
+  });
+  $("btn-export-ds").addEventListener("click", async () => {
+    try {
+      const res = await api("/api/export-dataset", { ratio: 0.8 });
+      toast("数据集已导出:train " + res.train + " / val " + res.val + " · " + res.path, "ok");
+    } catch (err) {
+      toast(err.message, "bad");
+    }
+  });
+
   /* CSV 拖拽:读文件内容发后端解析 */
   const drop = $("csv-drop");
   ["dragenter", "dragover"].forEach((ev) =>
@@ -652,11 +716,103 @@ async function boot() {
   try {
     applySnapshot(await api("/api/state"));
     await refreshSources();
+    state.labels = (await api("/api/labels")).labels;
+    state.annotations = (await api("/api/annotations")).records;
+    renderTable();
   } catch (err) {
     toast(`连接后端失败: ${err.message}`, "bad");
   }
   connectEvents();
   logLine("BatchCut Studio 已就绪", "sys");
+}
+
+async function annotate(clip, body) {
+  try {
+    const res = await api("/api/annotate", { clip, ...body, reviewer: "local-user" });
+    state.annotations[clip] = res.record;
+    const t = [...state.tasks.values()].find((x) => x.output === clip);
+    if (t) {
+      const tr = $("task-body").querySelector('tr[data-index="' + t.index + '"]');
+      if (tr) fillRow(tr, t);
+    }
+  } catch (err) {
+    toast(err.message, "bad");
+  }
+}
+
+function selectClip(index) {
+  state.selectedClip = index;
+  const t = state.tasks.get(index);
+  $("kbd-hint").hidden = false;
+  $("kbd-clip").textContent = t ? index + " " + t.output : "—";
+  document.querySelectorAll("#task-body tr").forEach((tr) => {
+    tr.classList.toggle("is-selected", Number(tr.dataset.index) === index);
+  });
+}
+
+function moveSelection(delta) {
+  const { list } = visibleTasks();
+  if (!list.length) return;
+  const pos = list.findIndex((t) => t.index === state.selectedClip);
+  const next = list[Math.min(list.length - 1, Math.max(0, pos + delta))] || list[0];
+  selectClip(next.index);
+  const tr = $("task-body").querySelector('tr[data-index="' + next.index + '"]');
+  if (tr) tr.scrollIntoView({ block: "nearest" });
+}
+
+document.addEventListener("keydown", (e) => {
+  if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+  if (!$("editor").hidden || !$("preview").hidden || !$("labelmgr").hidden) return;
+  if (!state.selectedClip) return;
+  const t = state.tasks.get(state.selectedClip);
+  if (!t || !t.output) return;
+  if (e.key === "Escape") { state.selectedClip = null; selectClip(-1); $("kbd-hint").hidden = true; return; }
+  if (e.key === "j" || e.key === "J") { moveSelection(-1); e.preventDefault(); return; }
+  if (e.key === "k" || e.key === "K") { moveSelection(1); e.preventDefault(); return; }
+  if (e.key === "q" || e.key === "Q") {
+    state.reviewMode = !state.reviewMode;
+    $("kbd-hint").style.background = state.reviewMode ? "rgba(244,63,94,.12)" : "rgba(99,102,241,.1)";
+    toast(state.reviewMode ? "审核模式:1 通过 / 2 需修正 / 3 剔除 / 4 待审" : "标注模式:数字键切标签", "");
+    return;
+  }
+  if (/^[1-9]$/.test(e.key)) {
+    if (state.reviewMode) {
+      const map = { 1: "approved", 2: "needs_fix", 3: "rejected", 4: "pending" };
+      if (map[e.key]) annotate(t.output, { status: map[e.key] });
+    } else {
+      const label = state.labels.find((l) => l.hotkey === e.key);
+      if (label) annotate(t.output, { labelId: label.id });
+    }
+    e.preventDefault();
+  }
+});
+
+function openLabelMgr() {
+  $("labelmgr").hidden = false;
+  renderLabelMgr();
+}
+
+function renderLabelMgr() {
+  const box = $("label-list");
+  box.innerHTML = "";
+  state.labels.forEach((label) => {
+    const row = document.createElement("div");
+    row.className = "label-row";
+    row.innerHTML = '<span class="dot" style="background:' + label.color + '"></span>' +
+      "<span>" + label.name + '</span><span style="color:var(--text-3)">' +
+      (label.hotkey ? "键 " + label.hotkey : "") + "</span>";
+    const del = document.createElement("button");
+    del.className = "del";
+    del.textContent = "删除";
+    del.addEventListener("click", async () => {
+      await api("/api/labels-delete", { id: label.id });
+      state.labels = (await api("/api/labels")).labels;
+      renderLabelMgr();
+      renderTable();
+    });
+    row.appendChild(del);
+    box.appendChild(row);
+  });
 }
 
 async function refreshSources() {
