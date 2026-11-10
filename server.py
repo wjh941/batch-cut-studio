@@ -28,6 +28,7 @@ import queue
 import threading
 import time
 import urllib.parse
+import webbrowser
 from urllib.parse import urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -512,6 +513,7 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     parser = argparse.ArgumentParser(description="BatchCut Studio 本地服务")
     parser.add_argument("--port", type=int, default=8963)
+    parser.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
     args = parser.parse_args()
 
     class Server(ThreadingHTTPServer):
@@ -533,7 +535,11 @@ def main() -> None:
                 raise SystemExit(1) from exc
     if chosen != args.port:
         print(f"端口 {args.port} 被系统圈占,自动改用 {chosen}", flush=True)
-    print(f"BatchCut Studio → http://{HOST}:{chosen}", flush=True)
+    url = f"http://{HOST}:{chosen}"
+    print(f"BatchCut Studio → {url}", flush=True)
+    if not args.no_open:
+        # 选好端口再开浏览器(自动顺延后 URL 才是准的)
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
