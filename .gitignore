@@ -4,3 +4,4 @@ config.json
 server.log
 demo/
 uploads/
+tmp_out/
