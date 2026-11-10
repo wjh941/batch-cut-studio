@@ -9,6 +9,11 @@
 </head>
 <body>
 
+<div id="offline" class="offline" hidden>
+  <span>⚠ 无法连接后端服务——请在项目目录运行 <b>python server.py</b>(注意启动日志打印的实际端口)</span>
+  <button id="offline-retry" class="btn ghost sm">重试连接</button>
+</div>
+
 <header class="topbar">
   <div class="brand">
     <div class="brand-mark">
@@ -178,6 +183,7 @@
         <button id="btn-retry" class="btn ghost sm" hidden>重试失败项</button>
         <button id="btn-report" class="btn ghost sm" hidden>导出失败清单</button>
         <button id="btn-labels" class="btn ghost sm">标签管理</button>
+        <button id="btn-bench" class="btn ghost sm">时间轴打点</button>
         <button id="btn-export-ds" class="btn soft sm">导出数据集</button>
       </div>
     </div>
@@ -241,6 +247,42 @@
   <span>已选中 <b id="kbd-clip">—</b></span>
   <span>数字键 1-9 切标签</span><span>Q 审核模式:1 通过 / 2 需修正 / 3 剔除 / 4 待审</span>
   <span>J / K 上下切换</span><span>Esc 取消选中</span>
+</div>
+
+<!-- 时间轴打点台 -->
+<div class="modal-backdrop" id="bench" hidden>
+  <div class="modal" style="width:min(980px,95vw)">
+    <div class="modal-head">
+      <strong>时间轴打点台</strong>
+      <select id="bench-source" class="input mono" style="width:auto"></select>
+      <span id="bench-clock" class="mono bench-clock">00:00.0</span>
+      <button class="modal-close" id="bench-close">✕</button>
+    </div>
+    <video id="bench-video" controls preload="metadata"></video>
+    <div class="bench-timeline">
+      <div class="bench-track" id="bench-track">
+        <div id="bench-kfs" class="bench-kfs"></div>
+        <div id="bench-seg" class="bench-seg" hidden></div>
+        <div id="bench-head" class="bench-head"></div>
+      </div>
+    </div>
+    <div class="bench-controls">
+      <button class="btn ghost sm" id="bench-setstart">设起点 (S)</button>
+      <span id="bench-start" class="mono bench-time">—</span>
+      <button class="btn ghost sm" id="bench-setend">设终点 (E)</button>
+      <span id="bench-end" class="mono bench-time">—</span>
+      <label class="bench-margin">前后各留
+        <input id="bench-margin" type="number" step="0.5" min="0" value="0"> 秒
+      </label>
+      <button class="btn primary sm" id="bench-append">追加片段 (Enter)</button>
+    </div>
+    <div class="bench-seg-head">已标记片段 <span id="bench-count">0</span> 个
+      <button class="btn ghost sm" id="bench-clear">清空</button>
+      <button class="btn soft sm" id="bench-adopt">装载为任务</button>
+    </div>
+    <div id="bench-list" class="bench-list"></div>
+    <div class="modal-foot">快捷键:Space 播放/暂停 · J 慢放 / K 暂停 / L 倍速(1×→2×→4×) · ←→ ±1s · Shift+←→ ±5s · S 起点 E 终点 Enter 追加 · Esc 关闭</div>
+  </div>
 </div>
 
 <!-- 预览弹窗 -->

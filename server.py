@@ -28,6 +28,7 @@ import queue
 import threading
 import time
 import urllib.parse
+from urllib.parse import urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -184,6 +185,19 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
             return self._json({"files": files})
+        if path == "/api/keyframes":
+            qs = parse_qs(urlparse(self.path).query)
+            source = (qs.get("source") or [""])[0].strip()
+            src = Path(CONFIG.raw_dir) / source
+            if not source or not src.is_file():
+                return self._json({"error": "源视频不存在"}, 404)
+            duration = ENGINE._probe_duration(source) or 0.0
+            keys = ENGINE.probe_keyframes(source, duration / 2, width=duration + 20) if duration else []
+            return self._json({"source": source, "duration": duration, "keyframes": keys})
+        if path == "/api/labels":
+            return self._json({"labels": LABELS.list_labels()})
+        if path == "/api/annotations":
+            return self._json({"records": LABELS.all_records(), "statuses": STATUSES})
         if path == "/api/events":
             return self._sse()
         if path.startswith("/media/source/") or path.startswith("/media/output/"):

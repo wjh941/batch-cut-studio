@@ -224,15 +224,21 @@ function fillRow(tr, t) {
   const anno = state.annotations[t.output] || { labelIds: [], status: "pending" };
   const chips = tr.querySelector(".anno-chips");
   chips.innerHTML = "";
+  if (!anno.labelIds.length) {
+    const empty = document.createElement("span");
+    empty.className = "anno-chip off";
+    empty.textContent = "点行选中 · 数字键打标";
+    chips.appendChild(empty);
+  }
   state.labels.forEach((label) => {
-    const on = anno.labelIds.includes(label.id);
+    if (!anno.labelIds.includes(label.id)) return;  // 紧凑:只显示已打的标签
     const chip = document.createElement("span");
     chip.className = "anno-chip";
-    chip.style.background = on ? label.color + "33" : "transparent";
-    chip.style.color = on ? label.color : "var(--text-3)";
-    chip.style.borderColor = on ? label.color : "var(--line)";
+    chip.style.background = label.color + "33";
+    chip.style.color = label.color;
+    chip.style.borderColor = label.color;
     chip.textContent = label.hotkey ? label.hotkey + " " + label.name : label.name;
-    chip.title = (on ? "点击摘除「" : "点击打上「") + label.name + "」";
+    chip.title = "点击摘除「" + label.name + "」";
     chip.addEventListener("click", (ev) => {
       ev.stopPropagation();
       annotate(t.output, { labelId: label.id });
@@ -557,6 +563,8 @@ async function saveEditor() {
    ============================================================ */
 
 function bind() {
+  bindBench();
+  $("offline-retry").addEventListener("click", () => location.reload());
   $("btn-load").addEventListener("click", () => loadCsv());
   $("btn-validate").addEventListener("click", () => loadCsv());
   $("btn-main").addEventListener("click", mainAction);
@@ -719,8 +727,10 @@ async function boot() {
     state.labels = (await api("/api/labels")).labels;
     state.annotations = (await api("/api/annotations")).records;
     renderTable();
+    $("offline").hidden = true;
   } catch (err) {
-    toast(`连接后端失败: ${err.message}`, "bad");
+    $("offline").hidden = false;
+    return;  // 离线时不渲染空表格误导人
   }
   connectEvents();
   logLine("BatchCut Studio 已就绪", "sys");
@@ -762,7 +772,7 @@ function moveSelection(delta) {
 
 document.addEventListener("keydown", (e) => {
   if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
-  if (!$("editor").hidden || !$("preview").hidden || !$("labelmgr").hidden) return;
+  if (!$("editor").hidden || !$("preview").hidden || !$("labelmgr").hidden || !$("bench").hidden) return;
   if (!state.selectedClip) return;
   const t = state.tasks.get(state.selectedClip);
   if (!t || !t.output) return;
@@ -812,6 +822,178 @@ function renderLabelMgr() {
     });
     row.appendChild(del);
     box.appendChild(row);
+  });
+}
+
+/* ============================================================
+   时间轴打点台
+   ============================================================ */
+
+const bench = {
+  source: "", duration: 0, start: null, end: null, segments: [], rate: 1,
+};
+
+function fmtShort(sec) {
+  sec = Math.max(0, sec);
+  const m = Math.floor(sec / 60);
+  return `${String(m).padStart(2, "0")}:${(sec % 60).toFixed(1)}s`;
+}
+
+async function openBench() {
+  $("bench").hidden = false;
+  if (!$("bench-source").options.length) {
+    const res = await api("/api/sources");
+    $("bench-source").innerHTML = res.files.map((f) => `<option value="${f}">${f}</option>`).join("") ||
+      '<option value="">来源目录暂无视频</option>';
+  }
+  if ($("bench-source").value && $("bench-source").value !== state.benchLoaded) loadBenchSource();
+}
+
+async function loadBenchSource() {
+  bench.source = $("bench-source").value;
+  state.benchLoaded = bench.source;
+  bench.segments = [];
+  bench.start = bench.end = null;
+  renderBenchList();
+  const video = $("bench-video");
+  video.src = `/media/source/${encodeURIComponent(bench.source)}`;
+  $("bench-kfs").innerHTML = '<span style="color:var(--text-3);font-size:11px;padding:14px">关键帧加载中…</span>';
+  try {
+    const res = await api(`/api/keyframes?source=${encodeURIComponent(bench.source)}`);
+    bench.duration = res.duration;
+    $("bench-kfs").innerHTML = "";
+    const kfBox = $("bench-kfs");
+    const cap = Math.min(res.keyframes.length, 2000);
+    for (let i = 0; i < cap; i++) {
+      const tick = document.createElement("div");
+      tick.className = "bench-kf";
+      tick.style.left = `${(res.keyframes[i] / res.duration) * 100}%`;
+      kfBox.appendChild(tick);
+    }
+  } catch {
+    $("bench-kfs").innerHTML = "";
+  }
+}
+
+function benchSeekTo(sec) {
+  const v = $("bench-video");
+  if (!bench.duration) return;
+  v.currentTime = Math.min(bench.duration - 0.05, Math.max(0, sec));
+}
+
+function renderBenchSeg() {
+  const seg = $("bench-seg");
+  if (bench.start == null || bench.end == null) {
+    seg.hidden = true;
+    return;
+  }
+  seg.hidden = false;
+  seg.style.left = `${(bench.start / bench.duration) * 100}%`;
+  seg.style.width = `${((bench.end - bench.start) / bench.duration) * 100}%`;
+}
+
+function renderBenchList() {
+  $("bench-count").textContent = bench.segments.length;
+  const box = $("bench-list");
+  box.innerHTML = bench.segments.map((s, i) =>
+    `<div class="bench-row"><span>#${i + 1}</span><span>${fmtShort(s[0])} → ${fmtShort(s[1])}</span>` +
+    `<span>(${(s[1] - s[0]).toFixed(1)}s)</span><button class="del" data-i="${i}">删除</button></div>`).join("");
+  box.querySelectorAll(".del").forEach((b) => b.addEventListener("click", () => {
+    bench.segments.splice(Number(b.dataset.i), 1);
+    renderBenchList();
+  }));
+}
+
+function benchAppend() {
+  if (bench.start == null || bench.end == null || bench.end <= bench.start) {
+    return toast("先用 S / E 设好起点和终点", "bad");
+  }
+  const m = parseFloat($("bench-margin").value) || 0;
+  let a = Math.max(0, bench.start - m);
+  let b = Math.min(bench.duration, bench.end + m);
+  bench.segments.push([Number(a.toFixed(3)), Number(b.toFixed(3))]);
+  bench.segments.sort((x, y) => x[0] - y[0]);
+  renderBenchList();
+  benchSeekTo(b);           // 连标:播放头跳到终点,起点自动衔接
+  bench.start = b;
+  bench.end = null;
+  renderBenchSeg();
+  $("bench-start").textContent = fmtShort(bench.start) + " (衔接)";
+  $("bench-end").textContent = "—";
+}
+
+async function adoptBench() {
+  if (!bench.segments.length) return toast("还没有标记任何片段", "bad");
+  try {
+    const res = await api("/api/adopt", { source: bench.source, segments: bench.segments });
+    toast(`已装载 ${res.total} 个任务(尚未写回 CSV)`, "ok");
+    closeBench();
+  } catch (err) {
+    toast(err.message, "bad");
+  }
+}
+
+function closeBench() {
+  $("bench").hidden = true;
+  $("bench-video").pause();
+}
+
+function bindBench() {
+  $("btn-bench").addEventListener("click", openBench);
+  $("bench-close").addEventListener("click", closeBench);
+  $("bench").addEventListener("click", (e) => { if (e.target === $("bench")) closeBench(); });
+  $("bench-source").addEventListener("change", loadBenchSource);
+
+  const track = $("bench-track");
+  track.addEventListener("click", (e) => {
+    const rect = track.getBoundingClientRect();
+    benchSeekTo(((e.clientX - rect.left) / rect.width) * bench.duration);
+  });
+
+  const video = $("bench-video");
+  video.addEventListener("timeupdate", () => {
+    $("bench-clock").textContent = fmtShort(video.currentTime);
+    if (bench.duration) {
+      $("bench-head").style.left = `${(video.currentTime / bench.duration) * 100}%`;
+      if (bench.start != null && bench.end != null) renderBenchSeg();
+    }
+  });
+
+  $("bench-setstart").addEventListener("click", () => {
+    bench.start = video.currentTime;
+    $("bench-start").textContent = fmtShort(bench.start);
+    renderBenchSeg();
+  });
+  $("bench-setend").addEventListener("click", () => {
+    bench.end = video.currentTime;
+    $("bench-end").textContent = fmtShort(bench.end);
+    renderBenchSeg();
+  });
+  $("bench-append").addEventListener("click", benchAppend);
+  $("bench-clear").addEventListener("click", () => { bench.segments = []; renderBenchList(); });
+  $("bench-adopt").addEventListener("click", adoptBench);
+
+  document.addEventListener("keydown", (e) => {
+    if ($("bench").hidden) return;
+    if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+    const v = $("bench-video");
+    if (e.key === "Escape") return closeBench();
+    if (e.key === " ") { v.paused ? v.play() : v.pause(); e.preventDefault(); return; }
+    if (e.key === "s" || e.key === "S") { bench.start = v.currentTime; $("bench-start").textContent = fmtShort(bench.start); renderBenchSeg(); return; }
+    if (e.key === "e" || e.key === "E") { bench.end = v.currentTime; $("bench-end").textContent = fmtShort(bench.end); renderBenchSeg(); return; }
+    if (e.key === "Enter") { benchAppend(); e.preventDefault(); return; }
+    if (e.key === "j" || e.key === "J") { v.playbackRate = 0.5; if (v.paused) v.play(); return; }
+    if (e.key === "k" || e.key === "K") { v.pause(); v.playbackRate = 1; bench.rate = 1; return; }
+    if (e.key === "l" || e.key === "L") {
+      v.play();
+      bench.rate = bench.rate >= 4 ? 1 : bench.rate * 2;
+      v.playbackRate = bench.rate;
+      return;
+    }
+    if (e.key === "ArrowLeft") { benchSeekTo(v.currentTime - (e.shiftKey ? 5 : 1)); e.preventDefault(); return; }
+    if (e.key === "ArrowRight") { benchSeekTo(v.currentTime + (e.shiftKey ? 5 : 1)); e.preventDefault(); return; }
+    if (e.key === ",") { benchSeekTo(v.currentTime - 0.04); return; }
+    if (e.key === ".") { benchSeekTo(v.currentTime + 0.04); return; }
   });
 }
 

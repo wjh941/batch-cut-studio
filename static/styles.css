@@ -748,3 +748,84 @@ tr.is-selected td { background: rgba(99, 102, 241, .08); }
 .label-row .dot { width: 10px; height: 10px; border-radius: 99px; }
 .label-row .del { margin-left: auto; border: 0; background: none; color: var(--text-3); cursor: pointer; }
 .label-row .del:hover { color: var(--bad); }
+/* 离线横幅 */
+.offline {
+  position: sticky;
+  top: 0;
+  z-index: 99;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 10px 20px;
+  background: rgba(248, 113, 113, .15);
+  border-bottom: 1px solid rgba(248, 113, 113, .4);
+  color: #fca5a5;
+  font-size: 13px;
+}
+
+/* 打点台 */
+.bench-clock { font-size: 15px; color: var(--acc-2); min-width: 70px; text-align: right; margin-left: auto; }
+.bench-timeline { padding: 0 18px; }
+.bench-track {
+  position: relative;
+  height: 44px;
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: crosshair;
+  overflow: hidden;
+}
+.bench-kfs { position: absolute; inset: 0; }
+.bench-kf { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(255,255,255,.14); }
+.bench-seg {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  background: rgba(99, 102, 241, .3);
+  border: 1px solid rgba(99, 102, 241, .7);
+  border-radius: 5px;
+  pointer-events: none;
+}
+.bench-head {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--acc-2);
+  pointer-events: none;
+}
+.bench-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 18px;
+}
+.bench-time { font-size: 12.5px; color: var(--text-2); min-width: 84px; }
+.bench-margin { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); margin-left: auto; }
+.bench-margin input { width: 56px; padding: 5px 8px; border-radius: 7px; border: 1px solid var(--line); background: var(--bg-raised); color: var(--text); }
+.bench-seg-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 18px 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.bench-seg-head button:first-of-type { margin-left: auto; }
+.bench-list { max-height: 160px; overflow: auto; padding: 0 18px 12px; display: flex; flex-direction: column; gap: 4px; }
+.bench-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-2);
+  padding: 5px 10px;
+  background: var(--panel);
+  border-radius: 7px;
+}
+.bench-row .del { margin-left: auto; border: 0; background: none; color: var(--text-3); cursor: pointer; }
+.bench-row .del:hover { color: var(--bad); }
