@@ -195,7 +195,8 @@ function fillRow(tr, t) {
   }
   const sub = document.createElement("span");
   sub.className = "sub";
-  sub.textContent = dur ? `时长${dur.slice(2)}` : "";
+  const durText = dur ? `时长${dur.slice(2)}` : "";
+  sub.textContent = t.hasAudio === false ? (durText ? durText + " · 🔇无音轨" : "🔇无音轨") : durText;
   if (sub.textContent) srcTd.appendChild(sub);
 
   tr.querySelector("td:nth-child(4)").textContent = `${t.start} → ${t.end}`;
@@ -970,6 +971,12 @@ function bindBench() {
     renderBenchSeg();
   });
   $("bench-append").addEventListener("click", benchAppend);
+  $("bench-mute").addEventListener("click", () => {
+    const v = $("bench-video");
+    v.muted = !v.muted;
+    $("bench-mute").textContent = v.muted ? "🔊" : "🔇";
+    $("bench-mute").title = v.muted ? "恢复声音" : "静音播放(坏音轨可脱离音轨看画面)";
+  });
   $("bench-clear").addEventListener("click", () => { bench.segments = []; renderBenchList(); });
   $("bench-adopt").addEventListener("click", adoptBench);
 

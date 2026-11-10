@@ -78,6 +78,7 @@ class ClipTask:
     seconds: float = 0.0          # 剪辑耗时
     source_exists: bool | None = None
     source_duration: float | None = None
+    has_audio: bool | None = None
     problem: str = ""             # dry-run 校验结论
 
     def public(self) -> dict:
@@ -90,6 +91,7 @@ class ClipTask:
             "seconds": round(self.seconds, 2),
             "sourceExists": self.source_exists,
             "sourceDuration": self.source_duration,
+            "hasAudio": self.has_audio,
             "problem": self.problem,
         }
 
@@ -165,6 +167,7 @@ def build_command(
     crf: int,
     encoder: str | None,
     with_progress: bool = False,
+    has_audio: bool | None = True,
 ) -> list[str]:
     """拼 ffmpeg 命令。
 
@@ -183,11 +186,12 @@ def build_command(
         # 输出端寻址要白白解码到目标点,输入端寻址是秒级与小时级的差别。
         # 代价是切点对齐前一个关键帧(监控视频 GOP 短,误差通常 <2s);
         # -avoid_negative_ts make_zero 防止寻址重置时间戳后容器写负 ts。
+        video_map = ["-map", "0:v"] if has_audio is False else ["-map", "0"]
         return [
             *head,
             "-ss", format_seconds(start_sec), "-i", str(input_path),
             "-t", f"{end_sec - start_sec:.3f}",
-            "-map", "0", "-dn", "-sn", "-c", "copy",
+            *video_map, "-dn", "-sn", "-c", "copy",
             "-avoid_negative_ts", "make_zero",
             str(output_path),
         ]
@@ -205,7 +209,7 @@ def build_command(
             "-ss", format_seconds(pre_seek), "-i", str(input_path),
             "-ss", f"{offset:.3f}", "-t", f"{duration:.3f}",
             "-map", "0", "-dn", "-sn", *video_args,
-            "-c:a", "aac", "-b:a", "128k",
+            *(["-c:a", "aac", "-b:a", "128k"] if has_audio is not False else []),
             str(output_path),
         ]
 
@@ -312,6 +316,27 @@ def segments_from_points(
     return segments
 
 
+def parse_stream_info(json_text: str) -> dict:
+    """ffprobe -show_entries stream=codec_type:format=duration -of json → {duration, has_audio}。"""
+    import json as _json
+    duration = None
+    has_audio = False
+    try:
+        data = _json.loads(json_text or "{}")
+        for stream in data.get("streams") or []:
+            if stream.get("codec_type") == "audio":
+                has_audio = True
+        duration = float((data.get("format") or {}).get("duration"))
+    except (ValueError, TypeError):
+        pass
+    return {"duration": duration, "has_audio": has_audio}
+
+
+def count_probe_errors(stderr_text: str) -> int:
+    """ffprobe -v error 的 stderr 非空行数 ≈ 解码/容器错误数。"""
+    return sum(1 for line in (stderr_text or "").splitlines() if line.strip())
+
+
 def expand_output(template: str, index: int, source: str, start: str, end: str) -> str:
     """输出命名模板:{source}=源文件名去扩展、{index}=三位行号、{start}/{end}=HHMMSS。"""
     def stamp(value: str) -> str:
@@ -382,6 +407,9 @@ class CutEngine:
         self._procs: set[subprocess.Popen] = set()
         self._duration_cache: dict[str, float | None] = {}
         self._kf_cache: dict = {}
+        self._media_cache: dict = {}
+        self._integrity_cache: dict = {}
+        self._source_health: dict = {}
         self.fieldnames: list[str] = []
         self.raw_rows: list[dict[str, str]] = []
         self._started_at: float | None = None
@@ -427,23 +455,77 @@ class CutEngine:
     # ---------- 环境准备 ----------
 
     def _probe_duration(self, source: str) -> float | None:
-        """ffprobe 源时长(秒),缓存;ffprobe 缺失或失败返回 None。"""
+        """源时长(秒),缓存;探测失败返回 None。"""
         if source in self._duration_cache:
             return self._duration_cache[source]
+        duration = self._probe_media(source)["duration"]
+        self._duration_cache[source] = duration
+        return duration
+
+    def _probe_media(self, source: str) -> dict:
+        """一次 ffprobe 拿 duration + has_audio(带缓存)。"""
+        if source in self._media_cache:
+            return self._media_cache[source]
         probe = ffprobe_path(self.cfg.ffmpeg)
-        duration = None
+        info = {"duration": None, "has_audio": None}
         if probe:
             try:
                 out = subprocess.run(
-                    [probe, "-v", "error", "-show_entries", "format=duration",
-                     "-of", "default=noprint_wrappers=1:nokey=1", str(Path(self.cfg.raw_dir) / source)],
-                    capture_output=True, text=True, errors="replace", timeout=30,
-                )
-                duration = float(out.stdout.strip())
+                    [probe, "-v", "error", "-show_entries",
+                     "stream=codec_type:format=duration", "-of", "json",
+                     str(Path(self.cfg.raw_dir) / source)],
+                    capture_output=True, text=True, errors="replace", timeout=30)
+                info = parse_stream_info(out.stdout)
             except Exception:
-                duration = None
-        self._duration_cache[source] = duration
-        return duration
+                pass
+        self._media_cache[source] = info
+        return info
+
+    def probe_integrity(self, source: str) -> tuple[bool, int]:
+        """容器级体检:ffprobe 能否完整 demux;返回 (是否健康, 错误行数)。"""
+        if source in self._integrity_cache:
+            return self._integrity_cache[source]
+        probe = ffprobe_path(self.cfg.ffmpeg)
+        ok, errors = True, 0
+        if probe:
+            try:
+                out = subprocess.run(
+                    [probe, "-v", "error", "-i", str(Path(self.cfg.raw_dir) / source),
+                     "-show_entries", "format=duration", "-of", "csv=p=0"],
+                    capture_output=True, text=True, errors="replace", timeout=120)
+                errors = count_probe_errors(out.stderr)
+                ok = out.returncode == 0 and errors == 0
+            except Exception:
+                ok, errors = False, 1
+        else:
+            ok, errors = True, 0  # 没有 ffprobe 时跳过体检,不误报
+        self._integrity_cache[source] = (ok, errors)
+        return ok, errors
+
+    def _probe_window_ok(self, source: str, start: float, end: float) -> tuple[bool, str]:
+        """切割前预检:目标区间能否读到视频包。读不到 = 区间损坏 → 提前报错。"""
+        probe = ffprobe_path(self.cfg.ffmpeg)
+        if not probe:
+            return True, ""
+        cmd = [
+            probe, "-v", "error", "-select_streams", "v:0",
+            "-read_intervals", f"{max(0.0, start):.3f}%{end:.3f}",
+            "-show_entries", "packet=pts_time", "-of", "csv=p=0",
+            str(Path(self.cfg.raw_dir) / source),
+        ]
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True,
+                                 errors="replace", timeout=60)
+        except Exception as exc:
+            return True, ""  # 预检自身失败不阻断切割,交给 ffmpeg 兜底
+        if out.returncode != 0:
+            first = (out.stderr or "").strip().splitlines()
+            detail = first[0] if first else f"ffprobe 退出码 {out.returncode}"
+            return False, f"切割区间 [{start:.1f}s→{end:.1f}s] 读取失败,疑似源损坏: {detail}"
+        packets = sum(1 for line in out.stdout.splitlines() if line.strip())
+        if packets == 0:
+            return False, f"切割区间 [{start:.1f}s→{end:.1f}s] 读不到任何视频包,疑似损坏或超出有效时长"
+        return True, ""
 
     def resolve_encoder(self) -> str | None:
         """encode 模式选视频编码器:off=None(CPU),auto=逐个试编,具体名=单测。"""
@@ -500,13 +582,21 @@ class CutEngine:
         return len(self.tasks)
 
     def _probe_all_sources(self) -> None:
+        seen_sources: set[str] = set()
         for task in self.tasks:
             if not task.source:
                 continue
             src = Path(self.cfg.raw_dir) / task.source
             task.source_exists = src.is_file()
+            if task.source not in seen_sources and task.source_exists:
+                seen_sources.add(task.source)
+                media = self._probe_media(task.source)
+                healthy, errors = self.probe_integrity(task.source)
+                self._source_health[task.source] = (healthy, errors)
             if task.source_exists and task.source_duration is None:
                 task.source_duration = self._probe_duration(task.source)
+            if task.source in self._media_cache:
+                task.has_audio = self._media_cache[task.source]["has_audio"]
 
     def validate(self) -> list[ClipTask]:
         """dry-run:不剪切,只把每个任务的问题写进 task.problem 并返回问题任务。"""
@@ -527,6 +617,9 @@ class CutEngine:
                     elif task.source_duration and end_sec > task.source_duration + 0.5:
                         issue = (f"end={task.end} 超出源时长"
                                  f" {task.source_duration:.1f}s,成片会提前截断")
+                    elif task.source in self._source_health and not self._source_health[task.source][0]:
+                        errors = self._source_health[task.source][1]
+                        issue = f"源视频疑似损坏(ffprobe 报告 {errors} 个错误),无法可靠切割"
                     elif not self.cfg.overwrite:
                         out = output_dir / task.output
                         if out.exists() and not is_valid_output(out):
@@ -627,10 +720,17 @@ class CutEngine:
                 else:
                     eff_mode = "encode"  # 回落:精准重编码
 
+            # 切割前预检:目标区间读不到视频包 → 提前报错,不让用户等半天 ffmpeg 才失败
+            window_ok, window_msg = self._probe_window_ok(task.source, eff_start, eff_end)
+            if not window_ok:
+                raise RuntimeError(f"预检失败: {window_msg}")
+
+            media = self._probe_media(task.source)
             command = build_command(
                 ffmpeg, input_path, output_path, eff_start, eff_end,
                 eff_mode, self.cfg.overwrite, self.cfg.crf,
                 self.encoder, with_progress=True,
+                has_audio=media.get("has_audio", True),
             )
             self._patch_task(task, status="running", progress=0.0, error="")
             self._log(f"[{task.index}/{total}] 切割 {task.source} {task.start}-{task.end}")

@@ -246,3 +246,45 @@ class TestSceneAndBlackParsing(unittest.TestCase):
         from core import parse_blackdetect
         text = "[blackdetect @ 0x] black_start:12.0 black_end:15.5 black_duration:3.5\n"
         self.assertEqual(parse_blackdetect(text), [(12.0, 15.5, 3.5)])
+
+
+class TestMediaProbe(unittest.TestCase):
+    def test_parse_stream_info(self):
+        from core import parse_stream_info
+        info = parse_stream_info('{"streams":[{"codec_type":"video"},{"codec_type":"audio"}],"format":{"duration":"30.5"}}')
+        self.assertTrue(info["has_audio"])
+        self.assertAlmostEqual(info["duration"], 30.5)
+        no_audio = parse_stream_info('{"streams":[{"codec_type":"video"}],"format":{"duration":"12"}}')
+        self.assertFalse(no_audio["has_audio"])
+
+    def test_count_probe_errors(self):
+        from core import count_probe_errors
+        self.assertEqual(count_probe_errors(""), 0)
+        self.assertEqual(count_probe_errors("error line 1\nerror line 2\n\n"), 2)
+
+
+class TestNoAudioCommand(unittest.TestCase):
+    def test_encode_without_audio_omits_audio_args(self):
+        """无音轨源(监控常见):encode 不再硬塞 aac 参数(脱离音轨)。"""
+        cmd = build_command("ffmpeg", Path("i.mp4"), Path("o.mp4"), 0.0, 5.0,
+                            "encode", False, 18, None, has_audio=False)
+        self.assertNotIn("-c:a", cmd)
+        self.assertNotIn("aac", cmd)
+
+    def test_encode_with_audio_keeps_aac(self):
+        cmd = build_command("ffmpeg", Path("i.mp4"), Path("o.mp4"), 0.0, 5.0,
+                            "encode", False, 18, None, has_audio=True)
+        self.assertIn("-c:a", cmd)
+
+    def test_copy_without_audio_maps_video_only(self):
+        """无音轨源:copy 只映射视频流,避免坏音轨拖垮整条命令。"""
+        cmd = build_command("ffmpeg", Path("i.mp4"), Path("o.mp4"), 0.0, 5.0,
+                            "copy", False, 18, None, has_audio=False)
+        self.assertIn("-map", cmd)
+        self.assertIn("0:v", cmd)
+        self.assertNotIn("0,v", str(cmd))
+
+    def test_copy_unknown_audio_keeps_full_map(self):
+        cmd = build_command("ffmpeg", Path("i.mp4"), Path("o.mp4"), 0.0, 5.0,
+                            "copy", False, 18, None, has_audio=None)
+        self.assertIn("0", cmd[cmd.index("-map") + 1])
