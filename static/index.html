@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BatchCut Studio · 批量剪辑工场</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%236366f1'/%3E%3Cstop offset='1' stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M11 10l10 6-10 6z' fill='white'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M9 6.5v11l9-5.5-9-5.5z" fill="currentColor"/></svg>
+    </div>
+    <div class="brand-text">
+      <strong>BatchCut Studio</strong>
+      <span>批量剪辑工场</span>
+    </div>
+  </div>
+
+  <div class="topbar-status">
+    <span id="stage-badge" class="stage-badge stage-idle">待命</span>
+    <div id="global-progress" class="global-progress" hidden>
+      <div class="global-progress-track"><div id="global-progress-fill" class="global-progress-fill"></div></div>
+      <span id="global-progress-text" class="global-progress-text">0%</span>
+    </div>
+  </div>
+
+  <div class="topbar-actions">
+    <button id="btn-validate" class="btn ghost" title="只校验不剪切,列出所有问题行">
+      <svg viewBox="0 0 24 24"><path d="M12 2 4 5.5v5.1c0 5 3.4 9.6 8 10.9 4.6-1.3 8-5.9 8-10.9V5.5L12 2zm-1.2 13.6-3-3 1.4-1.4 1.6 1.6 4-4 1.4 1.4-5.4 5.4z" fill="currentColor"/></svg>
+      校验清单
+    </button>
+    <button id="btn-main" class="btn primary" disabled>
+      <svg viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5-11-6.5z" fill="currentColor"/></svg>
+      开始执行
+    </button>
+  </div>
+</header>
+
+<main class="layout">
+
+  <!-- 左:配置面板 -->
+  <aside class="panel config-panel">
+    <h2 class="panel-title">任务来源</h2>
+
+    <label class="field">
+      <span class="field-label">来源目录 <em>origin videos</em></span>
+      <input id="cfg-raw-dir" class="input mono" spellcheck="false" placeholder="D:\监控视频\origin">
+    </label>
+
+    <label class="field">
+      <span class="field-label">输出目录 <em>clips</em></span>
+      <input id="cfg-output-dir" class="input mono" spellcheck="false" placeholder="D:\监控视频\clips">
+    </label>
+
+    <div class="field">
+      <span class="field-label">剪辑清单 CSV <em>source,start,end,output</em></span>
+      <input id="cfg-csv-path" class="input mono" spellcheck="false" placeholder="D:\clips\list.csv">
+      <div id="csv-drop" class="dropzone">
+        <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zM8 14l4-4 4 4h-3v4h-2v-4H8z" fill="currentColor"/></svg>
+        <span>拖拽 CSV 文件到这里<br><em>自动解析并列出任务</em></span>
+      </div>
+    </div>
+
+    <h2 class="panel-title">切割方式</h2>
+
+    <div class="segmented cols-3" id="mode-seg">
+      <button data-mode="smart" class="active">
+        <strong>智能自适应</strong><em>就近关键帧无损 · 自动兜底</em>
+      </button>
+      <button data-mode="encode">
+        <strong>精准重编码</strong><em>时间点准 · 硬件加速</em>
+      </button>
+      <button data-mode="copy">
+        <strong>极速无损</strong><em>秒切 · 对齐关键帧</em>
+      </button>
+    </div>
+
+    <div class="field-row cols-3">
+      <label class="field">
+        <span class="field-label">并发</span>
+        <input id="cfg-workers" class="input" type="number" min="1" max="16" value="3">
+      </label>
+      <label class="field" id="crf-field">
+        <span class="field-label">CRF</span>
+        <input id="cfg-crf" class="input" type="number" min="14" max="30" value="18">
+      </label>
+      <label class="field" id="hw-field">
+        <span class="field-label">硬件编码</span>
+        <select id="cfg-hw" class="input">
+          <option value="auto">自动探测</option>
+          <option value="h264_nvenc">NVIDIA NVENC</option>
+          <option value="h264_qsv">Intel QSV</option>
+          <option value="h264_amf">AMD AMF</option>
+          <option value="off">CPU 软编</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="field">
+      <span class="field-label">ffmpeg 路径 <em>留空用 PATH</em></span>
+      <input id="cfg-ffmpeg" class="input mono" spellcheck="false" placeholder="…\ffmpeg.exe">
+    </div>
+
+    <div class="field">
+      <span class="field-label">输出命名模板 <em>output 列为空时自动补名</em></span>
+      <input id="cfg-template" class="input mono" spellcheck="false" value="{source}_{index}_{start}">
+      <span class="field-hint">可用 {source} {index} {start} {end}</span>
+    </div>
+
+    <label class="check">
+      <input id="cfg-overwrite" type="checkbox">
+      <span>覆盖已存在的输出(关闭时自动跳过已完成,支持断点续跑)</span>
+    </label>
+
+    <h2 class="panel-title">自动生成清单</h2>
+    <div class="field">
+      <span class="field-label">源视频</span>
+      <select id="auto-source" class="input mono"></select>
+    </div>
+    <div class="field-row cols-3">
+      <label class="field">
+        <span class="field-label">方式</span>
+        <select id="auto-kind" class="input">
+          <option value="scene">场景切换</option>
+          <option value="black">黑场检测</option>
+        </select>
+      </label>
+      <label class="field" id="auto-th-field">
+        <span class="field-label">灵敏度</span>
+        <input id="auto-threshold" class="input" type="number" step="0.05" min="0.05" max="0.9" value="0.35">
+      </label>
+      <label class="field">
+        <span class="field-label">最短片段(s)</span>
+        <input id="auto-minseg" class="input" type="number" min="0.5" step="0.5" value="2">
+      </label>
+    </div>
+    <button id="btn-auto" class="btn soft wide">
+      <svg viewBox="0 0 24 24"><path d="M13 2 4.5 12.5H11L9.5 22 19 9.5h-6.5L13 2z" fill="currentColor"/></svg>
+      检测切片点
+    </button>
+    <div id="auto-result" class="load-result" hidden style="margin-top:10px"></div>
+    <div class="field-row" id="auto-actions" hidden style="margin-top:10px">
+      <button id="btn-adopt" class="btn soft sm">装载为任务</button>
+      <button id="btn-savecsv" class="btn ghost sm">写回 CSV</button>
+    </div>
+
+    <button id="btn-load" class="btn soft wide">
+      装载并校验 CSV
+    </button>
+    <div id="load-result" class="load-result" hidden></div>
+  </aside>
+
+  <!-- 右:统计 + 任务表 -->
+  <section class="panel main-panel">
+    <div class="stats" id="stats">
+      <div class="stat"><div class="stat-n" id="st-total">—</div><div class="stat-l">总任务</div></div>
+      <div class="stat"><div class="stat-n ok" id="st-done">0</div><div class="stat-l">完成</div></div>
+      <div class="stat"><div class="stat-n run" id="st-run">0</div><div class="stat-l">运行中</div></div>
+      <div class="stat"><div class="stat-n info" id="st-skip">0</div><div class="stat-l">跳过</div></div>
+      <div class="stat"><div class="stat-n bad" id="st-fail">0</div><div class="stat-l">失败</div></div>
+      <div class="stat"><div class="stat-n" id="st-eta">—</div><div class="stat-l">预计剩余</div></div>
+    </div>
+
+    <div class="table-tools">
+      <div class="chips" id="filter-chips">
+        <button class="chip active" data-f="all">全部</button>
+        <button class="chip" data-f="pending">待执行</button>
+        <button class="chip" data-f="running">运行中</button>
+        <button class="chip" data-f="done">完成</button>
+        <button class="chip" data-f="skip">跳过</button>
+        <button class="chip" data-f="fail">失败</button>
+      </div>
+      <div class="table-tools-right">
+        <button id="btn-retry" class="btn ghost sm" hidden>重试失败项</button>
+        <button id="btn-report" class="btn ghost sm" hidden>导出失败清单</button>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table class="tasks" id="task-table">
+        <thead>
+          <tr>
+            <th class="col-idx">#</th>
+            <th>状态</th>
+            <th>源视频</th>
+            <th>时间段</th>
+            <th>输出</th>
+            <th class="col-prog">进度</th>
+            <th class="col-act">预览</th>
+          </tr>
+        </thead>
+        <tbody id="task-body"></tbody>
+      </table>
+      <div id="table-empty" class="empty">
+        <svg viewBox="0 0 24 24"><path d="M4 4h16v4H4V4zm0 6h16v4H4v-4zm0 6h10v4H4v-4z" fill="currentColor" opacity=".35"/></svg>
+        <strong>还没有装载任务</strong>
+        <span>填好三个路径后点「装载并校验 CSV」,或直接把 CSV 拖进左侧虚线框</span>
+      </div>
+      <div id="table-note" class="table-note" hidden></div>
+    </div>
+  </section>
+</main>
+
+<!-- 日志抽屉 -->
+<footer class="logbar" id="logbar">
+  <button class="logbar-head" id="log-toggle">
+    <svg viewBox="0 0 24 24"><path d="M4 5h16v2H4V5zm0 6h16v2H4v-2zm0 6h10v2H4v-2z" fill="currentColor"/></svg>
+    <span>运行日志</span>
+    <span id="log-count" class="log-count">0</span>
+    <svg class="log-caret" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+  </button>
+  <div class="log-body" id="log-body" hidden>
+    <div id="log-lines" class="log-lines"></div>
+  </div>
+</footer>
+
+<!-- 预览弹窗 -->
+<div class="modal-backdrop" id="preview" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <strong id="preview-title">预览</strong>
+      <div class="modal-tabs">
+        <button class="tab active" data-p="source">源片(定位时间段)</button>
+        <button class="tab" data-p="output" id="tab-output">成品</button>
+      </div>
+      <button class="modal-close" id="preview-close">✕</button>
+    </div>
+    <video id="preview-video" controls preload="metadata"></video>
+    <div class="modal-foot mono" id="preview-meta"></div>
+  </div>
+</div>
+
+<!-- 编辑任务弹窗 -->
+<div class="modal-backdrop" id="editor" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <strong id="editor-title">编辑任务</strong>
+      <button class="modal-close" id="editor-close">✕</button>
+    </div>
+    <video id="editor-video" controls preload="metadata"></video>
+    <div class="edit-body">
+      <div class="edit-row">
+        <button class="btn ghost sm" id="edit-set-start">⟨ 把播放位置设为起点</button>
+        <button class="btn ghost sm" id="edit-set-end">把播放位置设为终点 ⟩</button>
+      </div>
+      <div class="edit-row">
+        <label class="field"><span class="field-label">起点</span><input id="edit-start" class="input mono"></label>
+        <label class="field"><span class="field-label">终点</span><input id="edit-end" class="input mono"></label>
+      </div>
+      <div class="edit-row">
+        <label class="field"><span class="field-label">源视频</span><input id="edit-source" class="input mono"></label>
+        <label class="field"><span class="field-label">输出文件名</span><input id="edit-output" class="input mono"></label>
+      </div>
+      <div id="edit-problem" class="load-result err" hidden></div>
+    </div>
+    <div class="modal-foot">
+      <span class="edit-note">保存后立即写回 CSV(保留原有全部列)</span>
+      <button class="btn ghost sm" id="editor-cancel">取消</button>
+      <button class="btn primary sm" id="editor-save">保存</button>
+    </div>
+  </div>
+</div>
+
+<div id="toasts" class="toasts"></div>
+<script src="app.js"></script>
+</body>
+</html>

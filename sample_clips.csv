@@ -1,0 +1,4 @@
+source,start,end,output
+cam01.mp4,00:00:05,00:00:12,cam01_event_a.mp4
+cam01.mp4,18.5,26,cam01_event_b.mp4
+cam02.mp4,00:00:15,00:00:22,cam02_event_a.mp4
