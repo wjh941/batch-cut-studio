@@ -381,25 +381,157 @@ def count_probe_errors(stderr_text: str) -> int:
     return sum(1 for line in (stderr_text or "").splitlines() if line.strip())
 
 
-def expand_output(template: str, index: int, source: str, start: str, end: str) -> str:
-    """输出命名模板:{source}=源文件名去扩展、{index}=三位行号、{start}/{end}=HHMMSS。"""
-    def stamp(value: str) -> str:
-        try:
-            sec = parse_time_to_seconds(value)
-        except ValueError:
-            sec = 0.0
-        return f"{int(sec // 3600):02d}{int((sec % 3600) // 60):02d}{int(sec % 60):02d}"
-    name = Path(source).stem or "clip"
-    rendered = (template
-                .replace("{source}", name)
-                .replace("{index}", f"{index:03d}")
-                .replace("{start}", stamp(start))
-                .replace("{end}", stamp(end)))
-    # 模板没写扩展名时补 .mp4:ffmpeg 必须靠扩展名推断容器,否则直接报
-    # "Unable to choose an output format"
-    if not Path(rendered).suffix:
+def seconds_delta(start: str, end: str) -> float:
+    """两个时间字符串之间的秒数差;解析失败按 0 处理。"""
+    try:
+        return parse_time_to_seconds(end) - parse_time_to_seconds(start)
+    except ValueError:
+        return 0.0
+
+
+VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".ts", ".flv", ".webm"}
+WIN_RESERVED = ({"CON", "PRN", "AUX", "NUL"}
+                | {f"COM{i}" for i in range(1, 10)}
+                | {f"LPT{i}" for i in range(1, 10)})
+TPL_VARS = ("source", "cam", "index", "order", "start", "end",
+            "duration", "dur", "labels", "label", "date")
+
+
+def _stamp(value: str) -> str:
+    try:
+        sec = parse_time_to_seconds(value)
+    except ValueError:
+        sec = 0.0
+    return f"{int(sec // 3600):02d}{int((sec % 3600) // 60):02d}{int(sec % 60):02d}"
+
+
+def _replace_tokens(template: str, values: dict[str, str], issues: list[str]) -> str:
+    """扫描式替换(支持嵌套花括号),不能用链式 str.replace。
+
+    链式 replace 的经典坑:源文件名含 {index} 时,{source} 先替换注入花括号,
+    后续 replace 会把注入的内容当成变量二次替换,文件名被篡改。
+
+    语法:
+      {var}          变量,未知变量记入 issues 并原样保留
+      {var?literal}  var 非空才渲染 literal(可嵌套 {var})
+      {var|fallback} var 为空时用 fallback
+      {{  }}         字面量大括号
+    """
+    out: list[str] = []
+    i, n = 0, len(template)
+    while i < n:
+        if template[i] != "{":
+            out.append(template[i])
+            i += 1
+            continue
+        if i + 1 < n and template[i + 1] == "{":
+            out.append("{")
+            i += 2
+            continue
+        depth, j = 0, i
+        while j < n:
+            if template[j] == "{":
+                depth += 1
+            elif template[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        if j >= n:
+            out.append(template[i:])
+            break
+        body = template[i + 1:j]
+        raw = template[i:j + 1]
+        i = j + 1
+        if "?" in body:
+            name, _, literal = body.partition("?")
+            if values.get(name.strip(), "").strip():
+                out.append(_replace_tokens(literal, values, issues))
+        elif "|" in body:
+            name, _, fallback = body.partition("|")
+            out.append(values.get(name.strip()) or fallback)
+        elif body in values:
+            out.append(values[body])
+        else:
+            issues.append(f"未知变量 {raw}")
+            out.append(raw)
+    return "".join(out)
+
+
+def expand_output(template: str, index: int, source: str, start: str, end: str,
+                  labels: str = "", date_str: str = "",
+                  issues: list[str] | None = None) -> str:
+    """渲染输出文件名。变量见 TPL_VARS;非法字符会被清洗,缺扩展名补 .mp4。"""
+    issues = [] if issues is None else issues
+    # 只剥掉已知的媒体扩展名;不能用 Path.stem——它会把 v1.2_gate 砍成 v1.2
+    raw_name = Path(source).name
+    name = raw_name
+    for ext in VIDEO_EXTS:
+        if raw_name.lower().endswith(ext):
+            name = raw_name[:-len(ext)]
+            break
+    name = name or "clip"
+    # 源文件名里的花括号无害化,防止注入后二次解析
+    name = name.replace("{", "").replace("}", "")
+    parts = [x for x in re.split(r"[+,|]", labels or "") if x.strip()]
+    seconds = max(0.0, seconds_delta(start, end))
+    values = {
+        "source": name, "cam": name,
+        "index": f"{index:03d}", "order": f"{index:03d}",
+        "start": _stamp(start), "end": _stamp(end),
+        "duration": str(int(seconds)), "dur": str(int(seconds)),
+        "labels": "__".join(parts), "label": parts[0] if parts else "",
+        "date": date_str or "",
+    }
+    rendered = _replace_tokens(template, values, issues)
+    # 非法字符清洗(Windows 禁用字符 + 控制字符)
+    rendered = re.sub(r'[<>:"/\\|?*]', "_", rendered)
+    rendered = "".join(ch if ord(ch) >= 32 else "_" for ch in rendered)
+    rendered = rendered.strip().rstrip(".")
+    if not rendered:
+        issues.append("渲染结果为空,已用默认名")
+        rendered = f"{name}_{_stamp(start)}-{_stamp(end)}"
+    # 扩展名白名单:Path("v1.2_clip").suffix 会误判为 .2_clip,不能只信 suffix
+    if Path(rendered).suffix.lower() not in VIDEO_EXTS:
         rendered += ".mp4"
+    stem = Path(rendered).stem
+    if stem.upper() in WIN_RESERVED:
+        issues.append(f"{stem} 是 Windows 保留名,已加前缀")
+        rendered = "_" + rendered
+    if len(rendered) > 120:
+        issues.append("文件名超过 120 字符,部分系统可能报错")
     return rendered
+
+
+def preview_template(template: str, samples: list[dict] | None = None) -> dict:
+    """模板预览:3 个样例真实渲染 + 全批重名检测(取代现有的 /api/template-preview)。"""
+    samples = samples or [
+        {"source": "cam01.mp4", "start": "00:00:12", "end": "00:00:18.5", "labels": "fall"},
+        {"source": "cam01.mp4", "start": "00:00:18.5", "end": "00:00:25", "labels": "fall+linger"},
+        {"source": "yard_20261110.mp4", "start": "0", "end": "3", "labels": ""},
+    ]
+    rendered: list[tuple[int, str]] = []
+    sample_out = []
+    for i, smp in enumerate(samples, start=1):
+        issues: list[str] = []
+        out = expand_output(template, i, smp.get("source", ""), smp.get("start", ""),
+                            smp.get("end", ""), smp.get("labels", ""),
+                            smp.get("date", ""), issues)
+        rendered.append((i, out))
+        sample_out.append({
+            "input": f"{smp.get('source', '')} {smp.get('start', '')}-{smp.get('end', '')}"
+                     f" [{smp.get('labels') or '无标签'}]",
+            "output": out, "issues": issues,
+        })
+    seen: dict[str, int] = {}
+    for idx, out in rendered:
+        key = out.lower()   # NTFS 大小写不敏感
+        if key in seen:
+            sample_out[idx - 1]["issues"].append(f"与样例 #{seen[key]} 重名(大小写不敏感)")
+        else:
+            seen[key] = idx
+    all_issues = sorted({msg for s in sample_out for msg in s["issues"]})
+    return {"samples": sample_out, "issues": all_issues, "variables": list(TPL_VARS)}
 
 
 def resolve_ffmpeg(configured_path: str) -> str:

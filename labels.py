@@ -100,7 +100,12 @@ class LabelStore:
                 name TEXT UNIQUE NOT NULL,
                 color TEXT NOT NULL DEFAULT '#8b5cf6',
                 hotkey TEXT NOT NULL DEFAULT '',
+                class_id INTEGER,
                 created_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS clip_status (
                 clip TEXT PRIMARY KEY,
@@ -115,6 +120,16 @@ class LabelStore:
                 updated_by TEXT NOT NULL DEFAULT '',
                 updated_at REAL NOT NULL,
                 UNIQUE(clip, label_id)
+            );
+            CREATE TABLE IF NOT EXISTS label_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                created_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS label_group_items (
+                group_id INTEGER NOT NULL REFERENCES label_groups(id) ON DELETE CASCADE,
+                label_id INTEGER NOT NULL REFERENCES labels(id) ON DELETE CASCADE,
+                UNIQUE(group_id, label_id)
             );
             CREATE TABLE IF NOT EXISTS clip_intervals (
                 clip TEXT NOT NULL,
@@ -132,30 +147,67 @@ class LabelStore:
                 reviewed_at REAL NOT NULL
             );
             """)
+            self._migrate()
+            cur = self._conn.execute("SELECT COUNT(*) AS n FROM label_groups")
+            if cur.fetchone()["n"] == 0:
+                now0 = time.time()
+                for gname in ("人员行为", "动物行为", "环境与其它"):
+                    self._conn.execute(
+                        "INSERT INTO label_groups(name, created_at) VALUES (?,?)", (gname, now0))
             cur = self._conn.execute("SELECT COUNT(*) AS n FROM labels")
             if cur.fetchone()["n"] == 0:
                 now = time.time()
-                for name, color, hotkey in DEFAULT_LABELS:
+                for class_id, (name, color, hotkey) in enumerate(DEFAULT_LABELS):
                     self._conn.execute(
-                        "INSERT INTO labels(name, color, hotkey, created_at) VALUES (?,?,?,?)",
-                        (name, color, hotkey, now))
+                        "INSERT INTO labels(name, color, hotkey, class_id, created_at) "
+                        "VALUES (?,?,?,?,?)",
+                        (name, color, hotkey, class_id, now))
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO meta(key,value) VALUES('next_class_id',?)",
+                    (str(len(DEFAULT_LABELS)),))
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """老库平滑升级:补齐后加的列,并给存量标签分配 class_id。"""
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(labels)")}
+        if "class_id" not in cols:
+            self._conn.execute("ALTER TABLE labels ADD COLUMN class_id INTEGER")
+            # 存量标签按 id 顺序分配 0..N-1
+            for i, row in enumerate(self._conn.execute(
+                    "SELECT id FROM labels ORDER BY id").fetchall()):
+                self._conn.execute("UPDATE labels SET class_id=? WHERE id=?", (i, row["id"]))
+            self._conn.execute(
+                "INSERT OR REPLACE INTO meta(key,value) VALUES('next_class_id',?)",
+                (str(len(cols) and i + 1 if cols else 0),))
+            self._conn.commit()
+
+    def _next_class_id(self) -> int:
+        """单调递增、永不复用的导出类 id(sorted() 会让 id 随增删漂移)。"""
+        row = self._conn.execute(
+            "SELECT value FROM meta WHERE key='next_class_id'").fetchone()
+        nxt = int(row["value"]) if row else 0
+        self._conn.execute(
+            "INSERT INTO meta(key,value) VALUES('next_class_id',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(nxt + 1),))
+        return nxt
 
     # ---------- 标签定义 ----------
 
     def list_labels(self) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT id, name, color, hotkey FROM labels ORDER BY id").fetchall()
+            "SELECT id, name, color, hotkey, class_id FROM labels ORDER BY id").fetchall()
         return [dict(r) for r in rows]
 
     def add_label(self, name: str, color: str = "#8b5cf6", hotkey: str = "") -> dict:
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO labels(name, color, hotkey, created_at) VALUES (?,?,?,?)",
-                (name.strip(), color, hotkey, time.time()))
+                "INSERT INTO labels(name, color, hotkey, class_id, created_at) "
+                "VALUES (?,?,?,?,?)",
+                (name.strip(), color, hotkey, self._next_class_id(), time.time()))
             self._conn.commit()
         row = self._conn.execute(
-            "SELECT id, name, color, hotkey FROM labels WHERE id = ?", (cur.lastrowid,)).fetchone()
+            "SELECT id, name, color, hotkey, class_id FROM labels WHERE id = ?",
+            (cur.lastrowid,)).fetchone()
         return dict(row)
 
     def delete_label(self, label_id: int) -> int:
@@ -292,6 +344,44 @@ class LabelStore:
                 })
         return rows
 
+    # ---------- 标签组 ----------
+
+    def list_groups(self) -> list[dict]:
+        groups = self._conn.execute(
+            "SELECT id, name FROM label_groups ORDER BY id").fetchall()
+        out = []
+        for g in groups:
+            items = self._conn.execute(
+                "SELECT label_id FROM label_group_items WHERE group_id=?", (g["id"],)).fetchall()
+            out.append({"id": g["id"], "name": g["name"],
+                        "labelIds": [r["label_id"] for r in items]})
+        return out
+
+    def add_group(self, name: str) -> dict:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO label_groups(name, created_at) VALUES (?,?)",
+                (name.strip(), time.time()))
+            self._conn.commit()
+        return {"id": cur.lastrowid, "name": name.strip(), "labelIds": []}
+
+    def set_group_labels(self, group_id: int, label_ids: list[int]) -> int:
+        """覆盖设置组成员。返回设置后的成员数。"""
+        with self._lock:
+            self._conn.execute("DELETE FROM label_group_items WHERE group_id=?", (group_id,))
+            for lid in label_ids:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO label_group_items(group_id, label_id) VALUES (?,?)",
+                    (group_id, int(lid)))
+            self._conn.commit()
+        return len(label_ids)
+
+    def delete_group(self, group_id: int) -> int:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM label_groups WHERE id=?", (group_id,))
+            self._conn.commit()
+        return cur.rowcount
+
     def label_stats(self) -> list[dict]:
         """标注统计(BORIS time budget 口径):每个标签的次数/总时长/均值/占比。"""
         name_of = {l["id"]: l["name"] for l in self.list_labels()}
@@ -320,7 +410,8 @@ class LabelStore:
         """训练集 manifest:按标签展开(一个片段多个标签 = 多行)。"""
         rows = []
         for clip, rec in sorted(self.all_records().items()):
-            if rec["status"] not in include_statuses or not rec["labelIds"]:
+            # 无标签但已审核的片段 = 负样本/背景样本,必须能导出
+            if rec["status"] not in include_statuses:
                 continue
             label_names = []
             for lid in rec["labelIds"]:
@@ -328,6 +419,8 @@ class LabelStore:
                     "SELECT name FROM labels WHERE id=?", (lid,)).fetchone()
                 if row:
                     label_names.append(row["name"])
+            if not label_names:
+                rows.append({"clip": clip, "label": "", "status": rec["status"]})
             for name in label_names:
                 rows.append({"clip": clip, "label": name, "status": rec["status"]})
         return rows

@@ -391,3 +391,86 @@ class TestOutputExtension(unittest.TestCase):
     def test_keeps_explicit_suffix(self):
         from core import expand_output
         self.assertEqual(expand_output("{source}.mkv", 2, "cam.mp4", "0", "5"), "cam.mkv")
+
+
+class TestTemplateEngineV2(unittest.TestCase):
+    def test_conditional_labels_appended(self):
+        from core import expand_output
+        self.assertEqual(expand_output("{source}{labels?__{labels}}", 1, "cam.mp4", "5", "12", "fall+linger"),
+                         "cam__fall__linger.mp4")
+
+    def test_conditional_labels_absent(self):
+        from core import expand_output
+        self.assertEqual(expand_output("{source}{labels?__{labels}}", 1, "yard.mp4", "0", "3"), "yard.mp4")
+
+    def test_no_variable_injection(self):
+        """源文件名含变量名时不能被二次替换(链式 replace 的经典坑)。"""
+        from core import expand_output
+        self.assertEqual(expand_output("{source}_{order}", 1, "gate_{order}.mp4", "0", "5"),
+                         "gate_order_001.mp4")
+
+    def test_dotted_name_not_mistaken_for_extension(self):
+        """v1.2_gate 的后缀是 .2_gate,不能被当成扩展名而砍掉。"""
+        from core import expand_output
+        self.assertEqual(expand_output("{source}", 1, "v1.2_gate", "0", "5"), "v1.2_gate.mp4")
+
+    def test_windows_reserved_name(self):
+        from core import expand_output
+        self.assertTrue(expand_output("CON", 1, "a.mp4", "0", "5").startswith("_"))
+
+    def test_unknown_variable_reported(self):
+        from core import preview_template
+        result = preview_template("{bogus}_x")
+        self.assertTrue(any("未知变量" in i for i in result["issues"]))
+
+    def test_fallback_syntax(self):
+        from core import expand_output
+        self.assertEqual(expand_output("{labels|nolabel}", 1, "a.mp4", "0", "5"), "nolabel.mp4")
+
+    def test_full_batch_collision_detection(self):
+        from core import preview_template
+        result = preview_template("{source}", samples=[
+            {"source": "a.mp4", "start": "0", "end": "5", "labels": "x"},
+            {"source": "A.mp4", "start": "0", "end": "5", "labels": "y"},
+        ])
+        self.assertTrue(any("重名" in i for i in result["issues"]))
+
+
+class TestClassIdStability(unittest.TestCase):
+    def test_class_id_monotonic_and_never_reused(self):
+        """class_id 必须单调递增且不复用——sorted() 会让 id 随标签增删漂移。"""
+        import tempfile
+        from pathlib import Path
+        from labels import LabelStore
+        db = Path(tempfile.mkdtemp()) / "t.sqlite"
+        st = LabelStore(db)
+        ids = [l["class_id"] for l in st.list_labels()]
+        self.assertEqual(ids, list(range(len(ids))))  # 初始从 0 连续分配
+        new = st.add_label("new_behavior")
+        self.assertEqual(new["class_id"], max(ids) + 1)  # 新标签追加,不平移旧的
+        fall_row = next(l for l in st.list_labels() if l["name"] == "fall")
+        st.delete_label(fall_row["id"])
+        after = [l["class_id"] for l in st.list_labels()]
+        self.assertNotIn(fall_row["class_id"], after)  # 删掉的 class_id 不复用
+        again = st.add_label("another")
+        self.assertGreater(again["class_id"], max(ids))  # 新标签继续往后分配
+
+
+class TestNegativeSamples(unittest.TestCase):
+    def test_manifest_includes_unlabeled_approved(self):
+        """无标签但已审核 = 负样本,必须能进 manifest(否则模型误报率失控)。"""
+        import tempfile
+        from pathlib import Path
+        from labels import LabelStore
+        db = Path(tempfile.mkdtemp()) / "t.sqlite"
+        st = LabelStore(db)
+        st.toggle_clip_label("pos.mp4", 1, "me")
+        st.set_intervals("pos.mp4", "cam.mp4", [(0.0, 5.0)])
+        st.set_clip_status("pos.mp4", "approved")
+        st.set_intervals("neg.mp4", "cam.mp4", [(5.0, 10.0)])
+        st.set_clip_status("neg.mp4", "approved")   # 无标签
+        rows = st.manifest_rows()
+        clips = {r["clip"] for r in rows}
+        self.assertIn("neg.mp4", clips)
+        neg_row = next(r for r in rows if r["clip"] == "neg.mp4")
+        self.assertEqual(neg_row["label"], "")

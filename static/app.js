@@ -685,6 +685,15 @@ function bind() {
     selectClip(Number(tr.dataset.index));
   });
   $("btn-labels").addEventListener("click", openLabelMgr);
+  $("cfg-template").addEventListener("input", refreshTemplatePreview);
+  $("group-add").addEventListener("click", async () => {
+    const name = $("group-new-name").value.trim();
+    if (!name) return;
+    await api("/api/groups-add", { name });
+    $("group-new-name").value = "";
+    await loadGroups();
+    renderLabelMgr();
+  });
   $("labelmgr-close").addEventListener("click", () => { $("labelmgr").hidden = true; });
   $("label-add").addEventListener("click", async () => {
     const name = $("label-new-name").value.trim();
@@ -747,7 +756,9 @@ async function boot() {
     await refreshSources();
     state.labels = (await api("/api/labels")).labels;
     state.annotations = (await api("/api/annotations")).records;
+    await loadGroups();
     renderTable();
+    refreshTemplatePreview();
     $("offline").hidden = true;
   } catch (err) {
     $("offline").hidden = false;
@@ -838,11 +849,46 @@ function renderLabelMgr() {
     del.addEventListener("click", async () => {
       await api("/api/labels-delete", { id: label.id });
       state.labels = (await api("/api/labels")).labels;
+      await loadGroups();
       renderLabelMgr();
       renderTable();
     });
     row.appendChild(del);
     box.appendChild(row);
+  });
+
+  // 标签组:勾选把标签归入该组
+  const groupBox = $("group-list");
+  if (!groupBox) return;
+  groupBox.innerHTML = "";
+  (state.groups || []).forEach((group) => {
+    const wrap = document.createElement("div");
+    wrap.className = "group-row";
+    const head = document.createElement("div");
+    head.className = "group-name";
+    head.textContent = group.name;
+    wrap.appendChild(head);
+    const chips = document.createElement("div");
+    chips.className = "group-chips";
+    state.labels.forEach((label) => {
+      const on = group.labelIds.includes(label.id);
+      const chip = document.createElement("span");
+      chip.className = "lbl" + (on ? " on" : "");
+      chip.style.background = on ? label.color + "33" : "transparent";
+      chip.style.color = on ? label.color : "var(--text-3)";
+      chip.style.borderColor = on ? label.color : "var(--line)";
+      chip.textContent = label.name;
+      chip.addEventListener("click", async () => {
+        const ids = new Set(group.labelIds);
+        ids.has(label.id) ? ids.delete(label.id) : ids.add(label.id);
+        await api("/api/groups-set", { groupId: group.id, labelIds: [...ids] });
+        await loadGroups();
+        renderLabelMgr();
+      });
+      chips.appendChild(chip);
+    });
+    wrap.appendChild(chips);
+    groupBox.appendChild(wrap);
   });
 }
 
@@ -1156,6 +1202,33 @@ function bindBench() {
     if (e.key === ",") { benchSeekTo(v.currentTime - 0.04); return; }
     if (e.key === ".") { benchSeekTo(v.currentTime + 0.04); return; }
   });
+}
+
+async function refreshTemplatePreview() {
+  const tpl = $("cfg-template").value.trim() || "{source}_{start}-{end}";
+  try {
+    const res = await api("/api/template-preview?t=" + encodeURIComponent(tpl));
+    const first = res.samples[0];
+    $("tpl-rendered").textContent = first ? first.output : "—";
+    const issuesEl = $("tpl-issues");
+    if (res.issues.length) {
+      issuesEl.textContent = "⚠ " + res.issues.join("；");
+      issuesEl.style.color = "var(--warn)";
+    } else {
+      issuesEl.textContent = "✓ 模板有效";
+      issuesEl.style.color = "var(--ok)";
+    }
+  } catch {
+    $("tpl-rendered").textContent = "—";
+  }
+}
+
+async function loadGroups() {
+  try {
+    state.groups = (await api("/api/groups")).groups;
+  } catch {
+    state.groups = [];
+  }
 }
 
 async function refreshSources() {

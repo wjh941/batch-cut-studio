@@ -35,7 +35,7 @@ from urllib.parse import urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from core import CutConfig, CutEngine, segments_from_points
+from core import CutConfig, CutEngine, preview_template, segments_from_points
 from labels import LabelStore, STATUSES, import_full_csv
 
 ROOT = Path(__file__).resolve().parent
@@ -201,6 +201,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"labels": LABELS.list_labels()})
         if path == "/api/annotations":
             return self._json({"records": LABELS.all_records(), "statuses": STATUSES})
+        if path == "/api/template-preview":
+            qs = parse_qs(urlparse(self.path).query)
+            tpl = (qs.get("t") or ["{source}_{start}-{end}"])[0]
+            return self._json(preview_template(tpl))
+        if path == "/api/groups":
+            return self._json({"groups": LABELS.list_groups()})
         if path == "/api/label-stats":
             return self._json({"stats": LABELS.label_stats(), "statuses": STATUSES})
         if path == "/api/events":
@@ -322,6 +328,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._adopt(body)
         if path == "/api/labels":
             return self._json({"labels": LABELS.list_labels()})
+        if path == "/api/groups-add":
+            return self._json({"ok": True, "group": LABELS.add_group(body.get("name", ""))})
+        if path == "/api/groups-set":
+            count = LABELS.set_group_labels(int(body.get("groupId", 0)),
+                                            [int(x) for x in body.get("labelIds", [])])
+            return self._json({"ok": True, "count": count})
+        if path == "/api/groups-delete":
+            removed = LABELS.delete_group(int(body.get("id", 0)))
+            return self._json({"ok": removed > 0})
         if path == "/api/labels-add":
             label = LABELS.add_label(body.get("name", ""), body.get("color", "#8b5cf6"),
                                      body.get("hotkey", ""))
@@ -370,6 +385,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "缺少 labelId 或 status"}, 400)
         if path == "/api/annotations":
             return self._json({"records": LABELS.all_records(), "statuses": STATUSES})
+        if path == "/api/groups":
+            return self._json({"groups": LABELS.list_groups()})
         if path == "/api/label-stats":
             return self._json({"stats": LABELS.label_stats(), "statuses": STATUSES})
         if path == "/api/export-dataset":
@@ -509,8 +526,24 @@ class Handler(BaseHTTPRequestHandler):
         rows = LABELS.manifest_rows()
         if not rows:
             return self._json({"error": "没有可导出的已审核标注"}, 400)
-        classes = sorted({r["label"] for r in rows})
-        class_ids = {name: i for i, name in enumerate(classes)}
+        # 用持久化的 class_id(新增标签不会让历史 class id 平移);
+        # 无标签 = 负样本,固定分到 0 号类
+        label_rows = {l["name"]: l for l in LABELS.list_labels()}
+        negative_name = "normal"
+        # 负样本占「最大 class_id + 1」,绝不与已有标签撞号
+        used = [l["class_id"] for l in label_rows.values() if l.get("class_id") is not None]
+        next_free = (max(used) + 1) if used else 0
+        class_ids: dict[str, int] = {}
+        for r in rows:
+            name = r["label"] or negative_name
+            if name in class_ids:
+                continue
+            cid = label_rows.get(name, {}).get("class_id")
+            if cid is None:
+                cid = next_free
+                next_free += 1
+            class_ids[name] = cid
+        classes = [n for n, _ in sorted(class_ids.items(), key=lambda kv: kv[1])]
         out_root = Path(CONFIG.output_dir) / "dataset"
         for split in ("train", "val"):
             (out_root / split).mkdir(parents=True, exist_ok=True)
@@ -523,6 +556,7 @@ class Handler(BaseHTTPRequestHandler):
         random.Random(42).shuffle(sources)
         n_val_sources = max(1, round(len(sources) * (1 - ratio))) if len(sources) > 1 else 0
         val_sources = set(sources[:n_val_sources])
+        single_source = len(sources) <= 1
         with manifest_path.open("w", encoding="utf-8-sig", newline="") as mf:
             writer = csv.writer(mf)
             writer.writerow(["split", "clip", "label", "class_id", "source"])
@@ -537,10 +571,20 @@ class Handler(BaseHTTPRequestHandler):
                     counts[split] += 1
                 split = seen[r["clip"]]
                 stem = Path(r["clip"]).stem
-                with (out_root / split / "labels" / (stem + ".txt")).open("a", encoding="utf-8") as lf:
-                    lf.write(str(class_ids[r["label"]]) + chr(10))
-                writer.writerow([split, r["clip"], r["label"], class_ids[r["label"]], r.get("source", "")])
-        (out_root / "classes.txt").write_text(chr(10).join(classes), encoding="utf-8")
+                # 覆盖写而非追加:重复导出不会累积重复行
+                lab_path = out_root / split / "labels" / (stem + ".txt")
+                cid = class_ids[r["label"] or negative_name]
+                if lab_path.exists():
+                    existing = lab_path.read_text(encoding="utf-8").split()
+                    if str(cid) not in existing:
+                        existing.append(str(cid))
+                    lab_path.write_text(chr(10).join(existing) + chr(10), encoding="utf-8")
+                else:
+                    lab_path.write_text(str(cid) + chr(10), encoding="utf-8")
+                writer.writerow([split, r["clip"], r["label"] or negative_name,
+                                 cid, r.get("source", "")])
+        classes_text = chr(10).join(f"{class_ids[n]} {n}" for n in classes) + chr(10)
+        (out_root / "classes.txt").write_text(classes_text, encoding="utf-8")
         stats = LABELS.label_stats()
         if stats:
             import io as _io
@@ -548,8 +592,14 @@ class Handler(BaseHTTPRequestHandler):
                 w = csv.DictWriter(sf, fieldnames=["label", "count", "total_sec", "mean_sec", "pct"])
                 w.writeheader()
                 w.writerows(stats)
+        warnings = []
+        if single_source:
+            warnings.append("只有 1 个源视频:val 为空,建议至少两个不同日期/机位")
+        if not val_sources and len(sources) > 1:
+            warnings.append("按源划分后 val 为空,请调整比例")
         self._json({"ok": True, "classes": classes, "train": counts["train"],
-                    "val": counts["val"], "path": str(out_root)})
+                    "val": counts["val"], "path": str(out_root),
+                    "warnings": warnings})
 
     def _annotate_export(self, body: dict) -> None:
         """模块 A 产出:把标注清单写成 CSV(source,start,end,output,labels,review_status,note)。"""

@@ -848,3 +848,13 @@ tr.is-selected td { background: rgba(99, 102, 241, .08); }
 .bench-row .st-approved { color: var(--ok); background: rgba(52,211,153,.14); }
 .bench-row .st-needs_fix { color: var(--warn); background: rgba(251,191,36,.14); }
 .bench-row .st-rejected { color: var(--bad); background: rgba(248,113,113,.14); }
+/* 模板预览 */
+.tpl-preview { display: flex; align-items: center; gap: 8px; margin-top: 7px; padding: 7px 10px; background: var(--bg-raised); border: 1px solid var(--line-soft); border-radius: 8px; }
+.tpl-label { font-size: 10.5px; color: var(--text-3); }
+.tpl-rendered { font: 11.5px var(--mono); color: var(--acc-2); word-break: break-all; }
+/* 标签组 */
+.group-head { margin-top: 16px; font-size: 11px; font-weight: 700; letter-spacing: .08em; color: var(--text-3); text-transform: uppercase; }
+.group-row { padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: 8px; margin-bottom: 6px; }
+.group-name { font-size: 12.5px; font-weight: 600; margin-bottom: 6px; color: var(--text-2); }
+.group-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.group-chips .lbl { font: 600 10px var(--mono); padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); cursor: pointer; }

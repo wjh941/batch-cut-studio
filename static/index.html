@@ -112,8 +112,13 @@
 
     <div class="field">
       <span class="field-label">输出命名模板 <em>output 列为空时自动补名</em></span>
-      <input id="cfg-template" class="input mono" spellcheck="false" value="{source}_{index}_{start}">
-      <span class="field-hint">可用 {source} {index} {start} {end}</span>
+      <input id="cfg-template" class="input mono" spellcheck="false" value="{source}_{start}-{end}{labels?__{labels}}">
+      <div class="tpl-preview">
+        <span class="tpl-label">预览</span>
+        <code id="tpl-rendered" class="tpl-rendered">—</code>
+      </div>
+      <span id="tpl-issues" class="field-hint"></span>
+      <span class="field-hint">变量 <code>{source}</code> <code>{order}</code> <code>{start}</code> <code>{end}</code> <code>{dur}</code> <code>{labels}</code> <code>{date}</code></span>
     </div>
 
     <label class="check">
@@ -237,7 +242,13 @@
       <div id="label-list" class="label-list"></div>
       <div class="edit-row" style="margin-top:12px">
         <input id="label-new-name" class="input mono" placeholder="新标签名,如 pool">
-        <button class="btn soft sm" id="label-add">添加</button>
+        <button class="btn soft sm" id="label-add">添加标签</button>
+      </div>
+      <div class="group-head">标签组(点标签可归组)</div>
+      <div id="group-list"></div>
+      <div class="edit-row" style="margin-top:8px">
+        <input id="group-new-name" class="input mono" placeholder="新组名,如 夜间行为">
+        <button class="btn ghost sm" id="group-add">添加组</button>
       </div>
     </div>
   </div>
