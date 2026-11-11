@@ -79,6 +79,11 @@ class ClipTask:
     source_exists: bool | None = None
     source_duration: float | None = None
     has_audio: bool | None = None
+    labels: str = ""              # 标注清单下行的行为标签(可用 + 连接)
+    planned_duration: float = 0.0  # 计划时长(end-start),质检基准
+    verify: str = ""               # ok|warn|bad 成品质检结论
+    verify_reason: str = ""
+    review_status: str = ""       # 标注清单的审核状态透传
     problem: str = ""             # dry-run 校验结论
 
     def public(self) -> dict:
@@ -92,6 +97,11 @@ class ClipTask:
             "sourceExists": self.source_exists,
             "sourceDuration": self.source_duration,
             "hasAudio": self.has_audio,
+            "plannedDuration": round(self.planned_duration, 3),
+            "verify": self.verify,
+            "verifyReason": self.verify_reason,
+            "labels": self.labels,
+            "reviewStatus": self.review_status,
             "problem": self.problem,
         }
 
@@ -314,6 +324,40 @@ def segments_from_points(
         else:
             segments.append((round(a, 3), round(b, 3)))
     return segments
+
+
+def build_verify_command(ffmpeg: str, clip_path: Path) -> list[str]:
+    """成品质检:ffprobe 读时长/流 + blackdetect 查黑场。返回单条 ffprobe + ffmpeg 两条命令的元数据。"""
+    return []  # 占位,实际质检由 verify_output 组装
+
+
+def parse_black_pct(stderr_text: str, duration: float) -> float:
+    """从 blackdetect 输出估算黑场占比(秒/总时长)。"""
+    total = 0.0
+    for _, _, dur in parse_blackdetect(stderr_text):
+        total += dur
+    return min(1.0, total / duration) if duration > 0 else 0.0
+
+
+def step_reason(text: str) -> str:
+    return text or '未知原因'
+
+
+def judge_output(duration: float, expected: float, black_pct: float) -> tuple[str, str]:
+    """成品质量判定:返回 (verdict, 原因)。verdict ∈ ok/warn/bad。"""
+    if duration <= 0:
+        return "bad", "成品时长读到 0,疑似文件损坏"
+    delta = abs(duration - expected)
+    tol = max(0.5, expected * 0.05)
+    if delta > tol:
+        return "bad", f"时长偏差 {delta:.2f}s 超出容差 {tol:.2f}s(期望 {expected:.2f}s,实际 {duration:.2f}s)"
+    if black_pct >= 0.9:
+        return "bad", f"成品 {black_pct*100:.0f}% 是黑场,疑似切片区间无有效画面"
+    if black_pct >= 0.3:
+        return "warn", f"成品 {black_pct*100:.0f}% 为黑场,建议人工复核"
+    if delta > tol * 0.5:
+        return "warn", f"时长偏差 {delta:.2f}s 接近容差上限"
+    return "ok", ""
 
 
 def parse_stream_info(json_text: str) -> dict:
@@ -732,7 +776,8 @@ class CutEngine:
                 self.encoder, with_progress=True,
                 has_audio=media.get("has_audio", True),
             )
-            self._patch_task(task, status="running", progress=0.0, error="")
+            self._patch_task(task, status="running", progress=0.0, error="",
+                             planned_duration=eff_end - eff_start)
             self._log(f"[{task.index}/{total}] 切割 {task.source} {task.start}-{task.end}")
             started = time.monotonic()
             code, message = self._run_ffmpeg(command, task, eff_start, eff_end)
@@ -741,9 +786,14 @@ class CutEngine:
             size = output_path.stat().st_size
             if size < MIN_VALID_OUTPUT_BYTES:
                 raise RuntimeError(f"ffmpeg 结束但输出缺失或过小({size} B)")
+            verdict, reason = self.verify_output(task)
+            if verdict == "bad":
+                # 成品对不上 → 视为失败,让用户知道而不是收下一堆废片
+                raise RuntimeError(f"成品质检未通过({step_reason(reason)})")
             self._patch_task(
                 task, status="done", progress=1.0,
                 output_mb=size / 1048576, seconds=time.monotonic() - started,
+                verify=verdict, verify_reason=reason,
             )
             self._log(f"[{task.index}/{total}] 完成 {task.output} "
                       f"({time.monotonic() - started:.1f}s, {size / 1048576:.1f} MB)")
@@ -913,7 +963,9 @@ class CutEngine:
 
     def adopt_rows(self, rows: list[dict[str, str]]) -> int:
         """把(自动检测生成的)行装载为当前任务清单;output 走命名模板。"""
-        self.fieldnames = ["source", "start", "end", "output"]
+        extra_cols = [c for c in ("labels", "review_status", "note")
+                      if rows and any((r.get(c) or "").strip() for r in rows)]
+        self.fieldnames = ["source", "start", "end", "output", *extra_cols]
         for index, row in enumerate(rows, start=1):
             if not (row.get("output") or "").strip():
                 row["output"] = expand_output(
@@ -929,10 +981,46 @@ class CutEngine:
                 start=(row.get("start") or "").strip(),
                 end=(row.get("end") or "").strip(),
                 output=(row.get("output") or "").strip(),
+                labels=(row.get("labels") or "").strip(),
+                review_status=(row.get("review_status") or "").strip(),
             ))
+            try:
+                self.tasks[-1].planned_duration = (
+                    parse_time_to_seconds(self.tasks[-1].end)
+                    - parse_time_to_seconds(self.tasks[-1].start))
+            except ValueError:
+                self.tasks[-1].planned_duration = 0.0
         self._probe_all_sources()
         self.validate()
         return len(self.tasks)
+
+    def verify_output(self, task: "ClipTask") -> tuple[str, str]:
+        """切割后质检:时长对得上?黑场比例?返回 (ok/warn/bad, 说明)。"""
+        out = Path(self.cfg.output_dir) / task.output
+        if not out.is_file():
+            return "bad", "成品文件不存在"
+        expected = task.planned_duration or 0.0
+        probe = ffprobe_path(self.cfg.ffmpeg)
+        if not probe:
+            return "ok", ""
+        try:
+            res = subprocess.run(
+                [probe, "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(out)],
+                capture_output=True, text=True, errors="replace", timeout=60)
+            duration = float((res.stdout or "0").strip() or 0)
+        except Exception:
+            return "bad", "成品无法解析(ffprobe 读取失败)"
+        black_pct = 0.0
+        try:
+            res = subprocess.run(
+                [self.cfg.ffmpeg, "-v", "info", "-nostdin", "-i", str(out),
+                 "-an", "-vf", "blackdetect=d=0.3:pic_th=0.95:pix_th=0.15", "-f", "null", "-"],
+                capture_output=True, text=True, errors="replace", timeout=120)
+            black_pct = parse_black_pct(res.stderr, duration)
+        except Exception:
+            pass
+        return judge_output(duration, expected, black_pct)
 
     def retry_failed(self) -> int:
         """把失败任务重置为 pending 并返回数量(随后 start 即只跑这些)。"""

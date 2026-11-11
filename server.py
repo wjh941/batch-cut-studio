@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import random
 import json
 import os
 import queue
@@ -200,6 +201,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"labels": LABELS.list_labels()})
         if path == "/api/annotations":
             return self._json({"records": LABELS.all_records(), "statuses": STATUSES})
+        if path == "/api/label-stats":
+            return self._json({"stats": LABELS.label_stats(), "statuses": STATUSES})
         if path == "/api/events":
             return self._sse()
         if path.startswith("/media/source/") or path.startswith("/media/output/"):
@@ -330,6 +333,28 @@ class Handler(BaseHTTPRequestHandler):
             clip = (body.get("clip") or "").strip()
             if not clip:
                 return self._json({"error": "缺少 clip"}, 400)
+            # 标注工作台:登记时间区间 + 按名字打标签 + 直接定审核状态
+            if body.get("intervals") is not None:
+                intervals = [(float(a), float(b)) for a, b in body["intervals"]]
+                LABELS.set_intervals(clip, body.get("source", ""), intervals)
+                if body.get("labels"):
+                    existing = {l["name"]: l["id"] for l in LABELS.list_labels()}
+                    ids = []
+                    for name in body["labels"]:
+                        if name not in existing:
+                            existing[name] = LABELS.add_label(name)["id"]
+                        ids.append(existing[name])
+                    with LABELS._lock:
+                        LABELS._conn.execute("DELETE FROM clip_labels WHERE clip=?", (clip,))
+                        for lid in ids:
+                            LABELS._conn.execute(
+                                "INSERT OR IGNORE INTO clip_labels(clip, label_id, updated_by, updated_at) "
+                                "VALUES (?,?,?,?)", (clip, lid, body.get("reviewer", "local-user"), time.time()))
+                        LABELS._conn.commit()
+                if body.get("status"):
+                    LABELS.set_clip_status(clip, body["status"],
+                                           body.get("reviewer", "local-user"), body.get("note", ""))
+                return self._json({"ok": True, "record": LABELS.clip_record(clip)})
             if body.get("labelId") is not None:
                 on = LABELS.toggle_clip_label(clip, int(body["labelId"]),
                                               body.get("reviewer", "local-user"))
@@ -345,6 +370,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "缺少 labelId 或 status"}, 400)
         if path == "/api/annotations":
             return self._json({"records": LABELS.all_records(), "statuses": STATUSES})
+        if path == "/api/label-stats":
+            return self._json({"stats": LABELS.label_stats(), "statuses": STATUSES})
         if path == "/api/export-dataset":
             return self._export_dataset(body)
         if path == "/api/migrate-vl":
@@ -354,6 +381,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": f"文件不存在: {src}"}, 400)
             count = import_full_csv(LABELS, p_in)
             return self._json({"ok": True, "clips": count})
+        if path == "/api/annotate-export":
+            return self._annotate_export(body)
+        if path == "/api/annotate-to-cut":
+            return self._annotate_to_cut(body)
+        if path == "/api/verify-all":
+            return self._verify_all()
         if path == "/api/save-csv":
             path_out = ENGINE.save_csv()
             return self._json({"ok": True, "path": str(path_out)})
@@ -454,6 +487,11 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": True})
 
     def _adopt(self, body: dict) -> None:
+        if body.get("rows"):
+            rows = [dict(r) for r in body["rows"]]
+            total = ENGINE.adopt_rows(rows)
+            BROADCAST.push({"type": "snapshot", "state": snapshot()})
+            return self._json({"ok": True, "total": total})
         source = (body.get("source") or "").strip()
         segments = body.get("segments") or []
         if not source or not segments:
@@ -480,13 +518,17 @@ class Handler(BaseHTTPRequestHandler):
         manifest_path = out_root / "manifest.csv"
         counts = {"train": 0, "val": 0}
         seen = {}
+        # 按「源视频」分组划分 train/val:同一源不出现在两个 split(防数据泄漏,调研明确建议)
+        sources = sorted({r["source"] for r in rows if r.get("source")})
+        random.Random(42).shuffle(sources)
+        n_val_sources = max(1, round(len(sources) * (1 - ratio))) if len(sources) > 1 else 0
+        val_sources = set(sources[:n_val_sources])
         with manifest_path.open("w", encoding="utf-8-sig", newline="") as mf:
             writer = csv.writer(mf)
-            writer.writerow(["split", "clip", "label", "class_id"])
+            writer.writerow(["split", "clip", "label", "class_id", "source"])
             for r in rows:
                 if r["clip"] not in seen:
-                    # 80/20 轮转分配(同片段文件只复制一次,多标签共用该文件)
-                    split = "val" if (counts["train"] + counts["val"]) % 5 == 4 else "train"
+                    split = "val" if r.get("source") in val_sources else "train"
                     src = Path(CONFIG.output_dir) / r["clip"]
                     if not src.is_file():
                         continue
@@ -497,10 +539,65 @@ class Handler(BaseHTTPRequestHandler):
                 stem = Path(r["clip"]).stem
                 with (out_root / split / "labels" / (stem + ".txt")).open("a", encoding="utf-8") as lf:
                     lf.write(str(class_ids[r["label"]]) + chr(10))
-                writer.writerow([split, r["clip"], r["label"], class_ids[r["label"]]])
+                writer.writerow([split, r["clip"], r["label"], class_ids[r["label"]], r.get("source", "")])
         (out_root / "classes.txt").write_text(chr(10).join(classes), encoding="utf-8")
+        stats = LABELS.label_stats()
+        if stats:
+            import io as _io
+            with (out_root / "label_stats.csv").open("w", encoding="utf-8-sig", newline="") as sf:
+                w = csv.DictWriter(sf, fieldnames=["label", "count", "total_sec", "mean_sec", "pct"])
+                w.writeheader()
+                w.writerows(stats)
         self._json({"ok": True, "classes": classes, "train": counts["train"],
                     "val": counts["val"], "path": str(out_root)})
+
+    def _annotate_export(self, body: dict) -> None:
+        """模块 A 产出:把标注清单写成 CSV(source,start,end,output,labels,review_status,note)。"""
+        include = body.get("includeStatuses") or None
+        rows = LABELS.annotation_rows(include_statuses=tuple(include) if include else None)
+        rows = [r for r in rows if r["start"]]
+        if not rows:
+            return self._json({"error": "没有带时间区间的标注可导出"}, 400)
+        out_dir = Path(CONFIG.output_dir) / "annotations"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        path = out_dir / f"annotation_list_{stamp}.csv"
+        fieldnames = ["source", "start", "end", "output", "labels", "review_status", "note"]
+        with path.open("w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+        self._json({"ok": True, "path": str(path), "rows": len(rows)})
+
+    def _annotate_to_cut(self, body: dict) -> None:
+        """模块 A → B:标注清单直接装载为切割任务(y=全部标注行)。"""
+        if ENGINE.stage == "running":
+            return self._json({"error": "剪辑运行中,稍后再转入"}, 409)
+        rows = LABELS.annotation_rows(include_statuses=tuple(body.get("includeStatuses") or ("approved",)))
+        rows = [r for r in rows if r["start"] and r["source"]]
+        if not rows:
+            return self._json({"error": "没有可转入的标注(需先打标并设审核状态)"}, 400)
+        cut_rows = [{"source": r["source"], "start": r["start"], "end": r["end"],
+                     "output": "", "labels": r["labels"], "review_status": r["review_status"]}
+                    for r in rows]
+        total = ENGINE.adopt_rows(cut_rows)
+        BROADCAST.push({"type": "snapshot", "state": snapshot()})
+        self._json({"ok": True, "total": total})
+
+    def _verify_all(self) -> None:
+        """模块 B 质检:对全部已完成任务重跑成品质检。"""
+        done = [t for t in ENGINE.tasks if t.status == "done"]
+        if not done:
+            return self._json({"error": "没有已完成的任务"}, 400)
+        results = []
+        for task in done:
+            verdict, reason = ENGINE.verify_output(task)
+            with ENGINE._lock:
+                task.verify = verdict
+                task.verify_reason = reason
+            BROADCAST.push({"type": "task", "index": task.index, "patch": task.public()})
+            results.append({"index": task.index, "verify": verdict, "reason": reason})
+        self._json({"ok": True, "results": results})
 
     def _start(self) -> None:
         if ENGINE.stage == "running":

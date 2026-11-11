@@ -215,6 +215,14 @@ function fillRow(tr, t) {
     m.textContent = meta.join(" · ");
     outTd.appendChild(m);
   }
+  if (t.verify) {
+    const v = document.createElement("span");
+    v.className = "sub";
+    v.style.color = t.verify === "bad" ? "var(--bad)" : t.verify === "warn" ? "var(--warn)" : "var(--ok)";
+    v.textContent = (t.verify === "bad" ? "✗ 质检不合格" : t.verify === "warn" ? "⚠ 待复核" : "✓ 质检通过") +
+      (t.verifyReason ? " · " + t.verifyReason : "");
+    outTd.appendChild(v);
+  }
 
   const pct = Math.round((t.progress || 0) * 100);
   const fill = tr.querySelector(".task-progress-fill");
@@ -687,6 +695,17 @@ function bind() {
     renderLabelMgr();
     renderTable();
   });
+  $("btn-verify").addEventListener("click", async () => {
+    try {
+      const res = await api("/api/verify-all", {});
+      const bad = res.results.filter((r) => r.verify === "bad").length;
+      const warn = res.results.filter((r) => r.verify === "warn").length;
+      toast(`质检完成:${res.results.length} 个成品 · ${bad} 不合格 · ${warn} 待复核`,
+            bad ? "bad" : "ok");
+    } catch (err) {
+      toast(err.message, "bad");
+    }
+  });
   $("btn-export-ds").addEventListener("click", async () => {
     try {
       const res = await api("/api/export-dataset", { ratio: 0.8 });
@@ -897,13 +916,60 @@ function renderBenchSeg() {
 function renderBenchList() {
   $("bench-count").textContent = bench.segments.length;
   const box = $("bench-list");
-  box.innerHTML = bench.segments.map((s, i) =>
-    `<div class="bench-row"><span>#${i + 1}</span><span>${fmtShort(s[0])} → ${fmtShort(s[1])}</span>` +
-    `<span>(${(s[1] - s[0]).toFixed(1)}s)</span><button class="del" data-i="${i}">删除</button></div>`).join("");
-  box.querySelectorAll(".del").forEach((b) => b.addEventListener("click", () => {
-    bench.segments.splice(Number(b.dataset.i), 1);
-    renderBenchList();
-  }));
+  box.innerHTML = "";
+  bench.segments.forEach((seg, i) => {
+    const [a, b, labels, status] = seg;
+    const row = document.createElement("div");
+    row.className = "bench-row" + (bench.selected === i ? " is-selected" : "");
+    row.innerHTML =
+      `<span>#${i + 1}</span><span>${fmtShort(a)} → ${fmtShort(b)}</span>` +
+      `<span>(${(b - a).toFixed(1)}s)</span>`;
+
+    // 标签 chips:点一下切换
+    const lblBox = document.createElement("span");
+    lblBox.className = "row-labels";
+    state.labels.forEach((label) => {
+      const on = (labels || []).includes(label.name);
+      const chip = document.createElement("span");
+      chip.className = "lbl" + (on ? " on" : "");
+      chip.style.background = on ? label.color + "33" : "transparent";
+      chip.style.color = on ? label.color : "var(--text-3)";
+      chip.style.borderColor = on ? label.color : "var(--line)";
+      chip.textContent = label.name;
+      chip.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const set = new Set(seg[2] || []);
+        set.has(label.name) ? set.delete(label.name) : set.add(label.name);
+        seg[2] = [...set];
+        renderBenchList();
+      });
+      lblBox.appendChild(chip);
+    });
+    row.appendChild(lblBox);
+
+    // 审核状态
+    const st = document.createElement("span");
+    st.className = "row-status st-" + (status || "pending");
+    st.textContent = ({ approved: "已通过", needs_fix: "需修正", rejected: "剔除" })[status] || "待审核";
+    row.appendChild(st);
+
+    const del = document.createElement("button");
+    del.className = "del";
+    del.textContent = "删除";
+    del.addEventListener("click", (e) => {
+      e.stopPropagation();
+      bench.segments.splice(i, 1);
+      renderBenchList();
+    });
+    row.appendChild(del);
+
+    row.addEventListener("click", () => {
+      bench.selected = i;
+      benchSeekTo(a);
+      renderBenchList();
+    });
+    box.appendChild(row);
+  });
 }
 
 function benchAppend() {
@@ -913,8 +979,9 @@ function benchAppend() {
   const m = parseFloat($("bench-margin").value) || 0;
   let a = Math.max(0, bench.start - m);
   let b = Math.min(bench.duration, bench.end + m);
-  bench.segments.push([Number(a.toFixed(3)), Number(b.toFixed(3))]);
+  bench.segments.push([Number(a.toFixed(3)), Number(b.toFixed(3)), [], "pending"]);
   bench.segments.sort((x, y) => x[0] - y[0]);
+  bench.selected = bench.segments.findIndex((sg) => sg[0] === Number(a.toFixed(3)));
   renderBenchList();
   benchSeekTo(b);           // 连标:播放头跳到终点,起点自动衔接
   bench.start = b;
@@ -924,11 +991,57 @@ function benchAppend() {
   $("bench-end").textContent = "—";
 }
 
+/** 标注工作台的快捷键:选中片段后打标签/定审核状态 */
+function benchHotkey(label) {
+  const i = bench.selected;
+  if (i == null || !bench.segments[i]) return;
+  const seg = bench.segments[i];
+  const set = new Set(seg[2] || []);
+  set.has(label.name) ? set.delete(label.name) : set.add(label.name);
+  seg[2] = [...set];
+  renderBenchList();
+}
+
+function benchSetStatus(status) {
+  const i = bench.selected;
+  if (i == null || !bench.segments[i]) return toast("先点一个片段选中它", "bad");
+  bench.segments[i][3] = status;
+  renderBenchList();
+  toast("状态:" + ({ approved: "已通过", needs_fix: "需修正", rejected: "剔除", pending: "待审核" })[status], "");
+}
+
+/** 保存标注到库里(片段成为"标注点",带源视频与时间区间) */
+async function benchSaveAnnotations() {
+  if (!bench.segments.length) return toast("还没有标注片段", "bad");
+  const issues = benchSelfCheck();
+  if (issues.length) {
+    toast("保存前请先处理:" + issues.join(";"), "bad");
+    throw new Error(issues.join(";"));
+  }
+  let saved = 0;
+  for (let i = 0; i < bench.segments.length; i++) {
+    const [a, b, labels, status] = bench.segments[i];
+    const clip = `${bench.source.replace(/\.[^.]+$/, "")}__${String(a).padStart(8, "0")}.mp4`;
+    await api("/api/annotate", {
+      clip, labelId: undefined, reviewer: "local-user",
+      intervals: [[a, b]], source: bench.source, labels, status,
+    }).catch(() => {});
+    saved++;
+  }
+  toast(`已保存 ${saved} 个标注`, "ok");
+}
+
 async function adoptBench() {
   if (!bench.segments.length) return toast("还没有标记任何片段", "bad");
   try {
-    const res = await api("/api/adopt", { source: bench.source, segments: bench.segments });
-    toast(`已装载 ${res.total} 个任务(尚未写回 CSV)`, "ok");
+    // 先落库成标注(带标签/审核),再转入切割车间
+    await benchSaveAnnotations();
+    const rows = bench.segments.map(([a, b, labels, status]) => ({
+      source: bench.source, start: String(a), end: String(b),
+      labels: (labels || []).join("+"), review_status: status || "pending",
+    }));
+    const res = await api("/api/adopt", { rows });
+    toast(`已转入剪辑车间 ${res.total} 个任务`, "ok");
     closeBench();
   } catch (err) {
     toast(err.message, "bad");
@@ -936,8 +1049,29 @@ async function adoptBench() {
 }
 
 function closeBench() {
+  // 关闭前兜底:提醒未打标签或未审核的片段(对标 BORIS 的 UNPAIRED 检查)
+  const untagged = bench.segments.filter(([, , labels]) => !labels || !labels.length).length;
+  const unreviewed = bench.segments.filter(([, , , status]) => !status || status === "pending").length;
+  if (untagged || unreviewed) {
+    toast(`提醒:${untagged} 个片段未打标签,${unreviewed} 个未审核——下次打开仍会保留`, "");
+  }
   $("bench").hidden = true;
   $("bench-video").pause();
+}
+
+/** 保存前自检:返回问题列表(空 = 可以放心落库) */
+function benchSelfCheck() {
+  const issues = [];
+  const untagged = bench.segments.filter(([, , labels]) => !labels || !labels.length);
+  const unreviewed = bench.segments.filter(([, , , status]) => !status || status === "pending");
+  if (untagged.length) issues.push(`${untagged.length} 个片段没打标签`);
+  if (unreviewed.length) issues.push(`${unreviewed.length} 个片段还没定审核状态(A 通过 / X 需修正 / R 剔除)`);
+  const overlapped = [];
+  for (let i = 1; i < bench.segments.length; i++) {
+    if (bench.segments[i][0] < bench.segments[i - 1][1] - 0.01) overlapped.push(i + 1);
+  }
+  if (overlapped.length) issues.push(`片段 #${overlapped.join(", #")} 与前一段重叠`);
+  return issues;
 }
 
 function bindBench() {
@@ -980,10 +1114,29 @@ function bindBench() {
   });
   $("bench-clear").addEventListener("click", () => { bench.segments = []; renderBenchList(); });
   $("bench-adopt").addEventListener("click", adoptBench);
+  $("bench-export").addEventListener("click", async () => {
+    try {
+      await benchSaveAnnotations();
+      const res = await api("/api/annotate-export", {});
+      toast(`标注清单已导出:${res.rows} 行 → ${res.path}`, "ok");
+    } catch (err) {
+      toast(err.message, "bad");
+    }
+  });
 
   document.addEventListener("keydown", (e) => {
     if ($("bench").hidden) return;
     if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+    // 标注工作台:选中片段时,数字键打标签 / A/X/R 定审核状态
+    if (bench.selected != null && !e.shiftKey && !e.ctrlKey && !e.altKey) {
+      if (/^[1-9]$/.test(e.key)) {
+        const label = state.labels.find((l) => l.hotkey === e.key);
+        if (label) { benchHotkey(label); e.preventDefault(); return; }
+      }
+      if (e.key === "a" || e.key === "A") { benchSetStatus("approved"); e.preventDefault(); return; }
+      if (e.key === "x" || e.key === "X") { benchSetStatus("needs_fix"); e.preventDefault(); return; }
+      if (e.key === "r" || e.key === "R") { benchSetStatus("rejected"); e.preventDefault(); return; }
+    }
     const v = $("bench-video");
     if (e.key === "Escape") return closeBench();
     if (e.key === " ") { v.paused ? v.play() : v.pause(); e.preventDefault(); return; }

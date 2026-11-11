@@ -288,3 +288,95 @@ class TestNoAudioCommand(unittest.TestCase):
         cmd = build_command("ffmpeg", Path("i.mp4"), Path("o.mp4"), 0.0, 5.0,
                             "copy", False, 18, None, has_audio=None)
         self.assertIn("0", cmd[cmd.index("-map") + 1])
+
+
+class TestOutputQuality(unittest.TestCase):
+    def test_judge_duration_ok(self):
+        from core import judge_output
+        verdict, _ = judge_output(10.02, 10.0, 0.0)
+        self.assertEqual(verdict, "ok")
+
+    def test_judge_duration_deviation_bad(self):
+        from core import judge_output
+        verdict, reason = judge_output(3.0, 10.0, 0.0)
+        self.assertEqual(verdict, "bad")
+        self.assertIn("时长偏差", reason)
+
+    def test_judge_black_frames(self):
+        from core import judge_output
+        self.assertEqual(judge_output(10.0, 10.0, 0.95)[0], "bad")
+        self.assertEqual(judge_output(10.0, 10.0, 0.5)[0], "warn")
+        self.assertEqual(judge_output(10.0, 10.0, 0.1)[0], "ok")
+
+    def test_zero_duration_is_bad(self):
+        from core import judge_output
+        self.assertEqual(judge_output(0.0, 10.0, 0.0)[0], "bad")
+
+    def test_parse_black_pct(self):
+        from core import parse_black_pct
+        text = "[blackdetect @ 0x] black_start:1.0 black_end:3.0 black_duration:2.0\n"
+        self.assertAlmostEqual(parse_black_pct(text, 10.0), 0.2)
+
+
+class TestAnnotationIntervals(unittest.TestCase):
+    def test_annotation_rows_carry_source_and_time(self):
+        import tempfile
+        from pathlib import Path
+        from labels import LabelStore
+        db = Path(tempfile.mkdtemp()) / "t.sqlite"
+        st = LabelStore(db)
+        st.toggle_clip_label("spot_a.mp4", 1, "me")
+        st.set_intervals("spot_a.mp4", "cam01.mp4", [(5.0, 12.0)])
+        st.set_clip_status("spot_a.mp4", "approved")
+        rows = st.annotation_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source"], "cam01.mp4")
+        self.assertEqual(rows[0]["start"], "5.000")
+        self.assertEqual(rows[0]["labels"], "fall")
+        self.assertEqual(rows[0]["review_status"], "approved")
+        # 只导审核通过的
+        st.set_clip_status("spot_a.mp4", "rejected")
+        self.assertEqual(len(st.annotation_rows(include_statuses=("approved",))), 0)
+
+
+class TestLabelStats(unittest.TestCase):
+    def test_stats_count_and_pct(self):
+        import tempfile
+        from pathlib import Path
+        from labels import LabelStore
+        db = Path(tempfile.mkdtemp()) / "t.sqlite"
+        st = LabelStore(db)
+        st.toggle_clip_label("a.mp4", 1, "me")   # fall
+        st.set_intervals("a.mp4", "cam.mp4", [(0.0, 10.0)])
+        st.set_clip_status("a.mp4", "approved")
+        st.toggle_clip_label("b.mp4", 3, "me")   # strangers_linger
+        st.set_intervals("b.mp4", "cam.mp4", [(10.0, 20.0)])
+        st.set_clip_status("b.mp4", "approved")
+        stats = {s["label"]: s for s in st.label_stats()}
+        self.assertEqual(stats["fall"]["count"], 1)
+        self.assertAlmostEqual(stats["fall"]["total_sec"], 10.0)
+        self.assertAlmostEqual(stats["fall"]["pct"], 50.0)
+        self.assertAlmostEqual(stats["strangers_linger"]["pct"], 50.0)
+
+    def test_stats_excludes_pending(self):
+        import tempfile
+        from pathlib import Path
+        from labels import LabelStore
+        db = Path(tempfile.mkdtemp()) / "t.sqlite"
+        st = LabelStore(db)
+        st.toggle_clip_label("x.mp4", 1, "me")   # 未审核
+        st.set_intervals("x.mp4", "cam.mp4", [(0.0, 5.0)])
+        self.assertEqual(st.label_stats(), [])
+
+
+class TestSourceGroupSplit(unittest.TestCase):
+    def test_no_source_crosses_splits(self):
+        """train/val 必须按源分组——同一源出现在两个 split 会造成数据泄漏。"""
+        import random
+        rows = [{"source": s, "clip": f"{s}_{i}"} for s in ["a.mp4", "b.mp4", "c.mp4", "d.mp4"] for i in range(3)]
+        sources = sorted({r["source"] for r in rows})
+        random.Random(42).shuffle(sources)
+        val_sources = set(sources[:1])
+        train = {r["source"] for r in rows if r["source"] not in val_sources}
+        val = {r["source"] for r in rows if r["source"] in val_sources}
+        self.assertFalse(train & val, f"源跨集: {train & val}")

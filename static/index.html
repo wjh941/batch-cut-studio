@@ -183,7 +183,8 @@
         <button id="btn-retry" class="btn ghost sm" hidden>重试失败项</button>
         <button id="btn-report" class="btn ghost sm" hidden>导出失败清单</button>
         <button id="btn-labels" class="btn ghost sm">标签管理</button>
-        <button id="btn-bench" class="btn ghost sm">时间轴打点</button>
+        <button id="btn-verify" class="btn ghost sm">成品质检</button>
+        <button id="btn-bench" class="btn soft sm">标注工作台</button>
         <button id="btn-export-ds" class="btn soft sm">导出数据集</button>
       </div>
     </div>
@@ -253,7 +254,7 @@
 <div class="modal-backdrop" id="bench" hidden>
   <div class="modal" style="width:min(980px,95vw)">
     <div class="modal-head">
-      <strong>时间轴打点台</strong>
+      <strong>标注工作台 · 源视频上边看边标</strong>
       <select id="bench-source" class="input mono" style="width:auto"></select>
       <span id="bench-clock" class="mono bench-clock">00:00.0</span>
       <button class="modal-close" id="bench-close">✕</button>
@@ -277,9 +278,11 @@
       <button class="btn primary sm" id="bench-append">追加片段 (Enter)</button>
       <button class="btn ghost sm" id="bench-mute" title="静音/恢复声音——坏音轨视频可脱离音轨播放">🔇</button>
     </div>
-    <div class="bench-seg-head">已标记片段 <span id="bench-count">0</span> 个
+    <div class="bench-seg-head">标注片段 <span id="bench-count">0</span> 个
+      <span class="bench-tip">选中片段 → 数字键打标签 · A 通过 / X 需修正 / R 剔除</span>
       <button class="btn ghost sm" id="bench-clear">清空</button>
-      <button class="btn soft sm" id="bench-adopt">装载为任务</button>
+      <button class="btn ghost sm" id="bench-export">导出标注清单</button>
+      <button class="btn soft sm" id="bench-adopt">转入剪辑车间</button>
     </div>
     <div id="bench-list" class="bench-list"></div>
     <div class="modal-foot">快捷键:Space 播放/暂停 · J 慢放 / K 暂停 / L 倍速(1×→2×→4×) · ←→ ±1s · Shift+←→ ±5s · S 起点 E 终点 Enter 追加 · Esc 关闭</div>

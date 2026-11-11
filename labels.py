@@ -116,6 +116,13 @@ class LabelStore:
                 updated_at REAL NOT NULL,
                 UNIQUE(clip, label_id)
             );
+            CREATE TABLE IF NOT EXISTS clip_intervals (
+                clip TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT '',
+                start_sec REAL NOT NULL,
+                end_sec REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS review_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 clip TEXT NOT NULL,
@@ -212,8 +219,11 @@ class LabelStore:
             "SELECT status, updated_by, note, updated_at FROM clip_status WHERE clip=?",
             (clip,)).fetchone()
         labels = self.labels_for(clip)
+        src_row = self._conn.execute(
+            "SELECT source FROM clip_intervals WHERE clip=? LIMIT 1", (clip,)).fetchone()
         return {
             "clip": clip,
+            "source": src_row["source"] if src_row else "",
             "status": st["status"] if st else "pending",
             "updatedBy": st["updated_by"] if st else "",
             "note": st["note"] if st else "",
@@ -237,6 +247,74 @@ class LabelStore:
         return counts
 
     # ---------- 导出 ----------
+
+    def clip_intervals(self, clip: str) -> list[tuple[float, float]]:
+        """片段的时间区间(保存标注时写入 interval 表;老数据为空)。"""
+        rows = self._conn.execute(
+            "SELECT start_sec, end_sec, source FROM clip_intervals WHERE clip=? ORDER BY rowid",
+            (clip,)).fetchall()
+        return [(r["start_sec"], r["end_sec"]) for r in rows]
+
+    def set_intervals(self, clip: str, source: str, intervals: list[tuple[float, float]]) -> None:
+        """登记片段对应的时间区间(同一片段可含多段,如跨摄像头拼接)。"""
+        with self._lock:
+            self._conn.execute("DELETE FROM clip_intervals WHERE clip=?", (clip,))
+            now = time.time()
+            for start, end in intervals:
+                self._conn.execute(
+                    "INSERT INTO clip_intervals(clip, source, start_sec, end_sec, updated_at) "
+                    "VALUES (?,?,?,?,?)", (clip, source, float(start), float(end), now))
+            self._conn.commit()
+
+    def annotation_rows(self, include_statuses: tuple[str, ...] | None = None) -> list[dict]:
+        """标注清单(标注模块的权威产出):一行一个片段,labels 用 + 连接。
+        字段与切割模块 CSV 兼容:source,start,end,output,labels,review_status,note"""
+        rows: list[dict] = []
+        name_of = {l["id"]: l["name"] for l in self.list_labels()}
+        for clip, rec in sorted(self.all_records().items()):
+            if include_statuses and rec["status"] not in include_statuses:
+                continue
+            names = [name_of[i] for i in rec["labelIds"] if i in name_of]
+            intervals = self.clip_intervals(clip)
+            if intervals:
+                for start, end in intervals:
+                    rows.append({
+                        "spot": clip, "source": rec.get("source", ""),
+                        "start": f"{start:.3f}", "end": f"{end:.3f}",
+                        "output": clip, "labels": "+".join(names),
+                        "review_status": rec["status"], "note": rec["note"],
+                    })
+            else:
+                rows.append({
+                    "spot": clip, "source": rec.get("source", ""), "start": "",
+                    "end": "", "output": clip, "labels": "+".join(names),
+                    "review_status": rec["status"], "note": rec["note"],
+                })
+        return rows
+
+    def label_stats(self) -> list[dict]:
+        """标注统计(BORIS time budget 口径):每个标签的次数/总时长/均值/占比。"""
+        name_of = {l["id"]: l["name"] for l in self.list_labels()}
+        agg: dict[str, dict] = {}
+        reviewed_total = 0.0
+        for clip, rec in self.all_records().items():
+            if rec["status"] not in ("approved", "needs_fix"):
+                continue
+            for start, end in self.clip_intervals(clip):
+                dur = max(0.0, end - start)
+                reviewed_total += dur
+                for lid in rec["labelIds"]:
+                    name = name_of.get(lid, f"#{lid}")
+                    item = agg.setdefault(name, {"label": name, "count": 0, "total_sec": 0.0})
+                    item["count"] += 1
+                    item["total_sec"] += dur
+        out = []
+        for item in agg.values():
+            item["mean_sec"] = round(item["total_sec"] / item["count"], 2) if item["count"] else 0.0
+            item["pct"] = round(item["total_sec"] / reviewed_total * 100, 1) if reviewed_total else 0.0
+            item["total_sec"] = round(item["total_sec"], 2)
+            out.append(item)
+        return sorted(out, key=lambda x: -x["total_sec"])
 
     def manifest_rows(self, include_statuses: tuple[str, ...] = ("approved",)) -> list[dict]:
         """训练集 manifest:按标签展开(一个片段多个标签 = 多行)。"""
