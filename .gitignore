@@ -6,3 +6,7 @@ demo/
 uploads/
 tmp_out/
 running.json
+start.out
+start.err
+running.json
+tmp_out/
