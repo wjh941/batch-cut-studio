@@ -154,14 +154,14 @@ class TestExpandOutput(unittest.TestCase):
     def test_tokens(self):
         from core import expand_output
         name = expand_output("{source}_{index}_{start}", 7, "cam02.mp4", "00:01:05.2", "0:02:30")
-        self.assertEqual(name, "cam02_007_000105")
+        self.assertEqual(name, "cam02_007_000105.mp4")
         name2 = expand_output("{source}_clip{index}", 12, "D:/x/frontdoor.avi", "5", "9")
-        self.assertEqual(name2, "frontdoor_clip012")
+        self.assertEqual(name2, "frontdoor_clip012.mp4")
 
     def test_bad_time_falls_back(self):
         from core import expand_output
         name = expand_output("{source}_{start}", 1, "a.mp4", "not-a-time", "")
-        self.assertEqual(name, "a_000000")
+        self.assertEqual(name, "a_000000.mp4")
 
 
 class TestUpdateTaskAndSave(unittest.TestCase):
@@ -197,7 +197,7 @@ class TestUpdateTaskAndSave(unittest.TestCase):
             csv_path.write_text("source,start,end,output\nv.mp4,0,5,\nv.mp4,10,20,keep.mp4\n",
                                 encoding="utf-8")
             engine.load_csv()
-            self.assertEqual(engine.tasks[0].output, "v_001_000000")
+            self.assertEqual(engine.tasks[0].output, "v_001_000000.mp4")
             self.assertEqual(engine.tasks[1].output, "keep.mp4")  # 已命名的行不动
 
 
@@ -380,3 +380,14 @@ class TestSourceGroupSplit(unittest.TestCase):
         train = {r["source"] for r in rows if r["source"] not in val_sources}
         val = {r["source"] for r in rows if r["source"] in val_sources}
         self.assertFalse(train & val, f"源跨集: {train & val}")
+
+
+class TestOutputExtension(unittest.TestCase):
+    def test_adds_mp4_when_template_has_no_suffix(self):
+        """模板不含扩展名时必须补 .mp4——否则 ffmpeg 无法推断容器格式直接报错。"""
+        from core import expand_output
+        self.assertEqual(expand_output("{source}_{index}", 1, "cam.mp4", "0", "5"), "cam_001.mp4")
+
+    def test_keeps_explicit_suffix(self):
+        from core import expand_output
+        self.assertEqual(expand_output("{source}.mkv", 2, "cam.mp4", "0", "5"), "cam.mkv")

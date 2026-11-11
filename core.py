@@ -390,11 +390,16 @@ def expand_output(template: str, index: int, source: str, start: str, end: str) 
             sec = 0.0
         return f"{int(sec // 3600):02d}{int((sec % 3600) // 60):02d}{int(sec % 60):02d}"
     name = Path(source).stem or "clip"
-    return (template
-            .replace("{source}", name)
-            .replace("{index}", f"{index:03d}")
-            .replace("{start}", stamp(start))
-            .replace("{end}", stamp(end)))
+    rendered = (template
+                .replace("{source}", name)
+                .replace("{index}", f"{index:03d}")
+                .replace("{start}", stamp(start))
+                .replace("{end}", stamp(end)))
+    # 模板没写扩展名时补 .mp4:ffmpeg 必须靠扩展名推断容器,否则直接报
+    # "Unable to choose an output format"
+    if not Path(rendered).suffix:
+        rendered += ".mp4"
+    return rendered
 
 
 def resolve_ffmpeg(configured_path: str) -> str:
