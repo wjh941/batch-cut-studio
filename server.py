@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import queue
 import threading
 import time
@@ -537,6 +538,14 @@ def main() -> None:
         print(f"端口 {args.port} 被系统圈占,自动改用 {chosen}", flush=True)
     url = f"http://{HOST}:{chosen}"
     print(f"BatchCut Studio → {url}", flush=True)
+    # 把实际地址写进文件:无论端口顺延到哪,重启脚本/其他工具都能读到正确 URL
+    try:
+        (ROOT / "running.json").write_text(
+            json.dumps({"url": url, "port": chosen, "pid": os.getpid(),
+                        "startedAt": time.strftime("%Y-%m-%d %H:%M:%S")},
+                       ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
     if not args.no_open:
         # 选好端口再开浏览器(自动顺延后 URL 才是准的)
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
@@ -544,6 +553,11 @@ def main() -> None:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n再见")
+    finally:
+        try:
+            (ROOT / "running.json").unlink()
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

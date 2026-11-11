@@ -13,6 +13,25 @@ train/val 数据集导出。零第三方依赖(Python 标准库 + SQLite + 手�
 
 ## 🚀 快速开始
 
+**Windows 双击即用**(推荐):
+
+```
+启动.bat    ← 启动服务(自动挑可用端口 + 自动开浏览器),关窗口即停
+打开.bat    ← 服务已在跑时,读 running.json 里的真实地址直接打开
+```
+
+> 服务的端口会被系统动态占用(本机 8963 起多段被代理/虚拟化驱动圈占),启动时会自动顺延并把自己的真实地址写入 `running.json`——所以**永远用 `打开.bat` 或看启动日志,不要收藏固定端口**。
+
+命令行:
+
+```bash
+python server.py            # 自动挑端口 + 自动开浏览器
+python server.py --no-open  # 不自动开浏览器
+python cli.py --dry-run     # 命令行校验清单
+```
+
+
+
 ```bash
 python server.py            # Web UI → http://127.0.0.1:8963(端口被占自动顺延)
 python cli.py --dry-run     # 命令行模式,兼容原脚本用法
