@@ -106,9 +106,10 @@ function setMode(mode) {
   document.querySelectorAll("#mode-seg button").forEach((b) => {
     b.classList.toggle("active", b.dataset.mode === mode);
   });
-  const encode = mode === "encode";
-  $("crf-field").style.display = encode ? "" : "none";
-  $("hw-field").style.display = encode ? "" : "none";
+  // smart 模式也会用重编码兜底 + 硬件编码,只有纯 copy 模式才隐藏这两个字段
+  const usesEncoder = mode !== "copy";
+  $("crf-field").style.display = usesEncoder ? "" : "none";
+  $("hw-field").style.display = usesEncoder ? "" : "none";
 }
 
 /* ============================================================
